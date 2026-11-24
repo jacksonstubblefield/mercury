@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__, config
 from .db import init_db
-from .routers import agents, docs, github, projects, source_control, tasks
+from .routers import agents, docs, github, projects, source_control, tasks, usage
 from .security import LocalOnlyMiddleware
 from .services import doc_summaries, embeddings
 from .services.agent_runner import RunManager
@@ -53,7 +53,7 @@ def create_app(run_manager: RunManager | None = None) -> FastAPI:
             "git_installed": shutil.which("git") is not None,
         }
 
-    for module in (projects, tasks, docs, github, source_control, agents):
+    for module in (projects, tasks, docs, github, source_control, agents, usage):
         app.include_router(module.router)
 
     dist = config.frontend_dist()

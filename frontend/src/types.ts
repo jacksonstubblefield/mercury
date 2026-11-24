@@ -292,3 +292,22 @@ export interface ScmActionResult {
   /** Set when a commit succeeded but the push that followed it failed. */
   error?: string;
 }
+
+/** One Claude Code plan limit, e.g. the 5-hour session window. */
+export interface UsageWindow {
+  key: string;
+  label: string;
+  /** Percent of the limit used, 0-100. */
+  utilization: number;
+  resets_at: string | null;
+  window_seconds: number;
+}
+
+export interface ClaudeUsage {
+  /** signed_out: no Claude subscription sign-in; expired: renew it by running `claude`. */
+  status: "ok" | "signed_out" | "expired" | "error";
+  message: string | null;
+  plan: string | null;
+  windows: UsageWindow[];
+  fetched_at: string | null;
+}

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from sqlmodel import Field, SQLModel
 
@@ -365,3 +365,25 @@ class ScmCommit(SQLModel):
     # Stage every change first when nothing is staged (like VS Code's "smart commit").
     stage_all: bool = False
     push: bool = False
+
+
+# --------------------------------------------------------------------------- Claude Code usage
+
+
+class UsageWindow(SQLModel):
+    """One plan limit, e.g. the 5-hour session window."""
+
+    key: str  # five_hour, seven_day, seven_day_opus, seven_day_sonnet
+    label: str
+    utilization: float  # percent of the limit used, 0-100
+    resets_at: Optional[datetime] = None
+    window_seconds: int
+
+
+class ClaudeUsage(SQLModel):
+    # signed_out: no Claude subscription sign-in found; expired: the sign-in needs renewing in Claude Code.
+    status: Literal["ok", "signed_out", "expired", "error"]
+    message: Optional[str] = None
+    plan: Optional[str] = None  # pro, max, team, ...
+    windows: list[UsageWindow] = []
+    fetched_at: Optional[datetime] = None

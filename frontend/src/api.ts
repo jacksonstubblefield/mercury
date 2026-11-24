@@ -1,6 +1,7 @@
 import type {
   AgentEvent,
   AgentRun,
+  ClaudeUsage,
   DiffKind,
   GhIssue,
   GhPull,
@@ -57,6 +58,7 @@ const del = (p: string) => request<void>("DELETE", p);
 
 export const api = {
   health: () => get<Health>("/api/health"),
+  claudeUsage: (refresh = false) => get<ClaudeUsage>(`/api/usage/claude-code${refresh ? "?refresh=true" : ""}`),
 
   projects: () => get<Project[]>("/api/projects"),
   project: (id: number) => get<Project>(`/api/projects/${id}`),
