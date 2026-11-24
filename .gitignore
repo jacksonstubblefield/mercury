@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+backend/.venv/
+
+# build output
+frontend/dist/
+dist/
+*.egg-info/
+build/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# local data / env
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+.claude/settings.local.json
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,21 @@
+{
+  "name": "mercury",
+  "productName": "Mercury",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop project manager with built-in Claude coding agents",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "setup": "npm install && node scripts/setup.cjs",
+    "dev": "concurrently -k -n ui,app -c magenta,cyan \"npm --prefix frontend run dev\" \"wait-on tcp:127.0.0.1:5173 && electron . --dev\"",
+    "build": "npm --prefix frontend run build",
+    "start": "npm run build && electron .",
+    "test": "npm run test:backend && npm --prefix frontend run typecheck",
+    "test:backend": "node scripts/test-backend.cjs"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.7",
+    "electron": "^45.4.1",
+    "wait-on": "^9.5.1"
+  }
+}
