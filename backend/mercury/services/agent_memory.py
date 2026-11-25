@@ -19,7 +19,7 @@ from sqlmodel import Session, func, select
 
 from ..db import get_engine
 from ..models import Doc, DocKind, DocStatus
-from . import doc_collections
+from . import doc_collections, refs
 from .memory_import import claude_projects_dir
 from .mercury_tools import SERVER_NAME
 
@@ -59,6 +59,7 @@ def docs_instructions(project_id: int) -> str:
         ).all()
         tree = doc_collections.tree(s, project_id)
         unfiled = doc_collections.doc_counts(s, project_id).get(None, 0)
+        key = refs.project_key(s, project_id)
 
     t = f"mcp__{SERVER_NAME}__"
     parts = [
@@ -88,12 +89,12 @@ def docs_instructions(project_id: int) -> str:
         "outside Mercury. You may read it, but never write to it; Mercury docs are your memory here.",
     ]
     if rules:
-        parts.append(_rules_section(list(rules)))
+        parts.append(_rules_section(list(rules), key))
     if pinned:
         lines = []
         for d in pinned:
             summary = d.summary if len(d.summary) <= PINNED_SUMMARY_CHARS else d.summary[: PINNED_SUMMARY_CHARS - 1] + "…"
-            lines.append(f"- Doc {d.id}: {d.title}" + (f": {summary}" if summary else ""))
+            lines.append(f"- {refs.doc_ref(key, d.number)}: {d.title}" + (f": {summary}" if summary else ""))
         parts.append("\n## Pinned docs\n" + "\n".join(lines))
     if tree:
         lines, used = [], 0
@@ -116,11 +117,11 @@ def docs_instructions(project_id: int) -> str:
     return "\n".join(parts)
 
 
-def _rules_section(rules: list[Doc]) -> str:
+def _rules_section(rules: list[Doc], key: str | None) -> str:
     t = f"mcp__{SERVER_NAME}__"
     text, used = [], 0
     for d in rules:
-        block = f"### {d.title} (doc {d.id})\n{d.body.strip()}"
+        block = f"### {d.title} ({refs.doc_ref(key, d.number)})\n{d.body.strip()}"
         if used + len(block) > MAX_RULES_CHARS:
             text.append(f"[More rules docs, cut for length: read them with {t}list_docs kind=rules.]")
             break
@@ -141,7 +142,8 @@ def rules_instructions(project_id: int) -> str:
             )
             .order_by(Doc.created_at)
         ).all()
-    return _rules_section(list(rules)) if rules else ""
+        key = refs.project_key(s, project_id)
+    return _rules_section(list(rules), key) if rules else ""
 
 
 # --------------------------------------------------------------------------- memory guard

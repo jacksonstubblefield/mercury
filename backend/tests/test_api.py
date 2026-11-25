@@ -57,6 +57,45 @@ def test_docs(client):
     assert client.get(f"/api/docs/{d['id']}").status_code == 404
 
 
+def test_old_run_costs_are_split_per_run(tmp_path, monkeypatch):
+    """Older runs stored a resumed session's running total as cost_usd; the migration splits it per run."""
+    import sqlite3
+
+    from mercury import db
+
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE agentrun (
+            id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, prompt VARCHAR NOT NULL,
+            parent_run_id INTEGER, session_id VARCHAR, cost_usd FLOAT
+        );
+        INSERT INTO agentrun VALUES (1, 1, 'a', NULL, 's1', 1.0);
+        INSERT INTO agentrun VALUES (2, 1, 'b', 1, 's1', 1.5);
+        INSERT INTO agentrun VALUES (3, 1, 'c', 2, 's1', NULL);  -- cancelled: no total
+        INSERT INTO agentrun VALUES (4, 1, 'd', 3, 's1', 2.25);
+        INSERT INTO agentrun VALUES (5, 1, 'e', NULL, 's2', 0.5);
+        INSERT INTO agentrun VALUES (6, 1, 'f', 5, 's3', 0.25);  -- parent had no session to resume
+        """
+    )
+    con.commit()
+    con.close()
+
+    monkeypatch.setenv("MERCURY_DATABASE_URL", f"sqlite:///{path}")
+    db.reset_engine()
+    try:
+        db.init_db()
+        db.init_db()  # idempotent: doesn't split twice
+    finally:
+        db.reset_engine()
+
+    con = sqlite3.connect(path)
+    rows = con.execute("SELECT id, cost_usd, session_cost_usd FROM agentrun ORDER BY id").fetchall()
+    con.close()
+    assert rows == [(1, 1.0, 1.0), (2, 0.5, 1.5), (3, None, None), (4, 0.75, 2.25), (5, 0.5, 0.5), (6, 0.25, 0.25)]
+
+
 def test_notes_table_is_migrated_to_docs(tmp_path, monkeypatch):
     import sqlite3
 

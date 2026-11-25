@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import { usePolling, useLoader } from "./hooks";
+import type { FocusRequest } from "./components/AgentsTab";
 import { ProjectForm } from "./components/ProjectForm";
 import { ProjectView } from "./components/ProjectView";
 import { AppearancePage } from "./components/AppearancePage";
 import { SettingsPage } from "./components/SettingsPage";
 import { Sidebar, type Page } from "./components/Sidebar";
+import { UsageGauge } from "./components/UsageGauge";
 import { UsagePage } from "./components/UsagePage";
+import { useAgentNotifications } from "./notifications";
 
 const LAST_PROJECT_KEY = "mercury.lastProject";
 
@@ -24,6 +27,22 @@ export default function App() {
   const reloadProjects = projects.reload;
   usePolling(reloadProjects, 5000);
 
+  // Sessions across all projects that are running, need an answer, or finished unseen (sidebar).
+  const attention = useLoader(() => api.attention(), []);
+  const reloadAttention = attention.reload;
+  usePolling(reloadAttention, 3000);
+  useAgentNotifications(attention.data, projects.data);
+
+  // A session to open in its project's Agents tab (from the sidebar or a notification).
+  const [openSession, setOpenSession] = useState<(FocusRequest & { projectId: number }) | null>(null);
+  const openRun = useCallback((projectId: number, runId: number) => {
+    setPage(null);
+    setSelectedId(projectId);
+    setOpenSession({ projectId, runId, nonce: Date.now(), scroll: "open" });
+  }, []);
+
+  useEffect(() => window.mercury?.onOpenRun?.(({ projectId, runId }) => openRun(projectId, runId)), [openRun]);
+
   useEffect(() => {
     const list = projects.data;
     if (!list) return;
@@ -36,7 +55,10 @@ export default function App() {
   }, [selectedId]);
 
   const selected = projects.data?.find((p) => p.id === selectedId) ?? null;
-  const onChanged = useCallback(() => void reloadProjects(), [reloadProjects]);
+  const onChanged = useCallback(() => {
+    void reloadProjects();
+    void reloadAttention();
+  }, [reloadProjects, reloadAttention]);
 
   return (
     <div className="app">
@@ -46,12 +68,16 @@ export default function App() {
         onSelect={(id) => {
           setSelectedId(id);
           setPage(null);
+          setOpenSession(null);
         }}
         onNew={() => setCreating(true)}
         page={page}
         onOpenPage={setPage}
+        sessions={attention.data ?? []}
+        onOpenSession={(s) => openRun(s.project_id, s.run_id)}
       />
       <main className="main">
+        <UsageGauge onOpen={() => setPage("usage")} />
         {projects.error && !projects.data && (
           <div className="banner">Can't reach the Mercury backend: {projects.error}</div>
         )}
@@ -62,7 +88,12 @@ export default function App() {
         ) : page === "settings" ? (
           <SettingsPage />
         ) : selected ? (
-          <ProjectView key={selected.id} project={selected} onChanged={onChanged} />
+          <ProjectView
+            key={selected.id}
+            project={selected}
+            onChanged={onChanged}
+            openSession={openSession?.projectId === selected.id ? openSession : null}
+          />
         ) : (
           projects.data && (
             <div className="empty">

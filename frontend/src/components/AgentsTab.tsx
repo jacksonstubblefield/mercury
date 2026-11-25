@@ -2,8 +2,20 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { api } from "../api";
 import { timeAgo, useLoader, usePolling } from "../hooks";
 import { ACTIVE_STATUSES as ACTIVE, groupSessions, runLabel, type Session } from "../sessions";
-import type { AgentEvent, AgentRun, PermissionMode, Project, StreamMessage, Task } from "../types";
+import { taskRef } from "../refs";
+import type {
+  AgentEvent,
+  AgentModel,
+  AgentRun,
+  PermissionMode,
+  Preferences,
+  Project,
+  SessionOpenScroll,
+  StreamMessage,
+  Task,
+} from "../types";
 import { BUILT_IN_DEFAULT_MODE, MODES, modeInfo } from "../permissions";
+import { AGENT_MODELS, BUILT_IN_DEFAULT_MODEL, modelInfo, modelLabel } from "../agentModels";
 import { Markdown } from "./Markdown";
 import { ImageStrip, MessageImages, usePastedImages } from "./PastedImages";
 import { ChangesPanel, EditCard, FilesContext, type FileEdit, fileEditsFrom, isEditTool, pathKey } from "./SessionChanges";
@@ -30,6 +42,66 @@ function ModeSelect({
   );
 }
 
+function ModelSelect({
+  value,
+  onChange,
+  title,
+  className,
+  disabled,
+}: {
+  value: string;
+  onChange: (model: AgentModel) => void;
+  title?: string;
+  className?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <select
+      className={className}
+      value={value}
+      onChange={(e) => onChange(e.target.value as AgentModel)}
+      title={title}
+      disabled={disabled}
+    >
+      {/* A session started on a model that's no longer offered still shows what it ran on. */}
+      {!modelInfo(value) && <option value={value}>{modelLabel(value)}</option>}
+      {AGENT_MODELS.map((m) => (
+        <option key={m.value} value={m.value}>
+          {m.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** Next to a field label: "Default" when the choice is the default, else a link that makes it the default. */
+function DefaultLink({
+  isDefault,
+  projectHasOwn,
+  what,
+  onMakeDefault,
+}: {
+  isDefault: boolean;
+  projectHasOwn: boolean;
+  what: string;
+  onMakeDefault: () => void;
+}) {
+  if (isDefault) return <span className="faint">{projectHasOwn ? "Project default" : "Default"}</span>;
+  return (
+    <button
+      className="link-btn"
+      onClick={onMakeDefault}
+      title={
+        projectHasOwn
+          ? `Preselect this ${what} for new sessions in this project`
+          : `Preselect this ${what} for new sessions (projects can override it in Settings)`
+      }
+    >
+      {projectHasOwn ? "Make project default" : "Make default"}
+    </button>
+  );
+}
+
 /** Enter sends, Shift+Enter adds a line (as in Claude Code). */
 function isSendKey(e: React.KeyboardEvent) {
   return e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing;
@@ -41,28 +113,65 @@ function errorText(e: unknown) {
 
 // ------------------------------------------------------------------------- sessions
 
-type View = { kind: "new" } | { kind: "session"; rootId: number };
+/** `fresh`: a session just started here, which follows its output rather than opening per the setting. */
+type View = { kind: "new" } | { kind: "session"; rootId: number; fresh?: boolean };
 type Jump = { runId: number; smooth: boolean; nonce: number };
+
+/**
+ * Show the session containing `runId`. "run" scrolls to that run's message (links from the board and
+ * docs); "open" opens it like a click in the session list, where the `session_open_scroll` setting says.
+ * A new `nonce` reopens it even if it's the same run.
+ */
+export type FocusRequest = { runId: number; nonce: number; scroll: "run" | "open" };
+
+/** Used until the saved preferences load, or if they can't. Mirrors `Preferences` in models.py. */
+const BUILT_IN_OPEN_SCROLL: SessionOpenScroll = "last_message";
 
 interface Props {
   project: Project;
   initialTask: Task | null;
   onConsumeInitialTask: () => void;
-  focusRunId: number | null;
+  focus: FocusRequest | null;
   onChanged: () => void;
 }
 
-export function AgentsTab({ project, initialTask, onConsumeInitialTask, focusRunId, onChanged }: Props) {
+export function AgentsTab({ project, initialTask, onConsumeInitialTask, focus, onChanged }: Props) {
   const runs = useLoader(() => api.runs(project.id), [project.id]);
   const tasks = useLoader(() => api.tasks(project.id), [project.id]);
-  const sessions = useMemo(() => groupSessions(runs.data ?? []), [runs.data]);
+  // Where a session opens. Sessions wait for it (it's a local read), so they don't open in one place and jump.
+  const prefs = useLoader(() => api.preferences(), []);
+  const prefsSettled = !!prefs.data || !!prefs.error;
+  const openScroll = prefs.data?.session_open_scroll ?? BUILT_IN_OPEN_SCROLL;
+  const sessions =useMemo(() => groupSessions(runs.data ?? []), [runs.data]);
   const [view, setView] = useState<View | null>(initialTask ? { kind: "new" } : null);
-  const [jump, setJump] = useState<Jump | null>(focusRunId ? { runId: focusRunId, smooth: false, nonce: 0 } : null);
+  const [jump, setJump] = useState<Jump | null>(
+    focus?.scroll === "run" ? { runId: focus.runId, smooth: false, nonce: 0 } : null,
+  );
 
   const anyActive = (runs.data ?? []).some((r) => ACTIVE.has(r.status));
   usePolling(runs.reload, 3000, anyActive);
 
+  // A later focus request (e.g. a sidebar click while this tab is open) switches sessions. The run may be
+  // newer than our list, so reload once if it's missing.
+  const handledFocus = useRef(focus?.nonce ?? null);
+  const reloadedFor = useRef<number | null>(null);
+  useEffect(() => {
+    if (!focus || focus.nonce === handledFocus.current || !runs.data) return;
+    const target = sessions.find((s) => s.runs.some((r) => r.id === focus.runId));
+    if (!target) {
+      if (reloadedFor.current !== focus.nonce) {
+        reloadedFor.current = focus.nonce;
+        void runs.reload();
+      }
+      return;
+    }
+    handledFocus.current = focus.nonce;
+    setView({ kind: "session", rootId: target.rootId });
+    setJump(focus.scroll === "run" ? { runId: focus.runId, smooth: false, nonce: focus.nonce } : null);
+  }, [focus, sessions, runs.data, runs.reload]);
+
   // Pick what to show once runs have loaded: the focused run's session, else the latest session.
+  const focusRunId = focus?.runId ?? null;
   useEffect(() => {
     if (view !== null || !runs.data) return;
     const focused = focusRunId ? sessions.find((s) => s.runs.some((r) => r.id === focusRunId)) : undefined;
@@ -76,6 +185,29 @@ export function AgentsTab({ project, initialTask, onConsumeInitialTask, focusRun
   }, [initialTask]);
 
   const current = view?.kind === "session" ? sessions.find((s) => s.rootId === view.rootId) : undefined;
+
+  // Opening a finished session counts as seeing it, which takes it off the sidebar's Sessions list.
+  // Only while the window has focus: a session that finishes in the background should still show up.
+  const unseenId = current && !ACTIVE.has(current.latest.status) && !current.latest.seen ? current.latest.id : null;
+  const { setData: setRuns } = runs;
+  useEffect(() => {
+    if (unseenId === null) return;
+    let sent = false;
+    const mark = () => {
+      if (sent || !document.hasFocus()) return;
+      sent = true;
+      api
+        .markSeen(unseenId)
+        .then((run) => {
+          setRuns((prev) => prev?.map((r) => (r.id === run.id ? run : r)));
+          onChanged();
+        })
+        .catch(() => (sent = false));
+    };
+    mark();
+    window.addEventListener("focus", mark);
+    return () => window.removeEventListener("focus", mark);
+  }, [unseenId, setRuns, onChanged]);
 
   const addRun = (run: AgentRun) => {
     runs.setData((prev) => [run, ...(prev ?? []).filter((r) => r.id !== run.id)]);
@@ -95,6 +227,11 @@ export function AgentsTab({ project, initialTask, onConsumeInitialTask, focusRun
     setJump({ runId, smooth: already, nonce: Date.now() });
   }
 
+  const taskRefs = useMemo(
+    () => new Map((tasks.data ?? []).map((t) => [t.id, taskRef(project.key, t)])),
+    [tasks.data, project.key],
+  );
+
   return (
     <div className="agents">
       <div className="agents-side">
@@ -106,6 +243,7 @@ export function AgentsTab({ project, initialTask, onConsumeInitialTask, focusRun
             <SessionItem
               key={s.rootId}
               session={s}
+              taskLabel={s.latest.task_id != null ? taskRefs.get(s.latest.task_id) : undefined}
               selected={s.rootId === current?.rootId}
               onSelect={() => {
                 setView({ kind: "session", rootId: s.rootId });
@@ -127,16 +265,18 @@ export function AgentsTab({ project, initialTask, onConsumeInitialTask, focusRun
           onProjectChanged={onChanged}
           onCancel={sessions.length ? () => setView({ kind: "session", rootId: sessions[0].rootId }) : undefined}
           onStarted={(run) => {
-            setView({ kind: "session", rootId: run.id });
+            setView({ kind: "session", rootId: run.id, fresh: true });
             setJump(null);
             addRun(run);
           }}
         />
-      ) : current ? (
+      ) : current && prefsSettled ? (
         <SessionView
           key={current.rootId}
           project={project}
           session={current}
+          taskLabel={current.latest.task_id != null ? taskRefs.get(current.latest.task_id) : undefined}
+          openAt={view?.kind === "session" && view.fresh ? "bottom" : openScroll}
           jump={jump}
           onSent={(run) => {
             setJump(null);
@@ -153,11 +293,14 @@ export function AgentsTab({ project, initialTask, onConsumeInitialTask, focusRun
 
 function SessionItem({
   session,
+  taskLabel,
   selected,
   onSelect,
   onJump,
 }: {
   session: Session;
+  /** The linked task's id (e.g. MER-12), if it still exists. */
+  taskLabel?: string;
   selected: boolean;
   onSelect: () => void;
   onJump: (runId: number) => void;
@@ -169,7 +312,7 @@ function SessionItem({
       <div className="prompt">{runLabel(runs[0])}</div>
       <div className="row" style={{ fontSize: 12 }}>
         <span className={`status ${latest.status}`}>{latest.status.replace("_", " ")}</span>
-        {latest.task_id && <span className="faint">T-{latest.task_id}</span>}
+        {taskLabel && <span className="faint">{taskLabel}</span>}
         {runs.length > 1 && <span className="faint">{runs.length} messages</span>}
         <span className="spacer" />
         {cost > 0 && <span className="faint">${cost.toFixed(2)}</span>}
@@ -217,12 +360,16 @@ function NewSession({
 }) {
   const [prompt, setPrompt] = useState("");
   const [taskId, setTaskId] = useState<number | null>(null);
-  // The project's own default, if it has one, else the app-wide one (loaded below).
+  // The project's own defaults, where it has them, else the app-wide ones (loaded below).
+  const [prefs, setPrefs] = useState<Preferences | null>(null);
   const projectDefault = project.default_permission_mode;
-  const [appDefault, setAppDefault] = useState<PermissionMode | null>(null);
-  const defaultMode = projectDefault ?? appDefault;
+  const defaultMode = projectDefault ?? prefs?.default_permission_mode ?? null;
   const [mode, setMode] = useState<PermissionMode>(projectDefault ?? BUILT_IN_DEFAULT_MODE);
   const modeTouched = useRef(false);
+  const projectModel = project.default_model;
+  const defaultModel = projectModel ?? prefs?.default_model ?? null;
+  const [model, setModel] = useState<AgentModel>(projectModel ?? BUILT_IN_DEFAULT_MODEL);
+  const modelTouched = useRef(false);
   const [budget, setBudget] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -231,17 +378,17 @@ function NewSession({
   useEffect(() => {
     if (initialTask) {
       setTaskId(initialTask.id);
-      setPrompt(`Complete task T-${initialTask.id}: ${initialTask.title}`);
+      setPrompt(`Complete task ${taskRef(project.key, initialTask)}: ${initialTask.title}`);
       onConsumeInitialTask();
     }
-  }, [initialTask, onConsumeInitialTask]);
+  }, [initialTask, onConsumeInitialTask, project.key]);
 
   useEffect(() => {
     let live = true;
     api
       .preferences()
-      .then((p) => live && setAppDefault(p.default_permission_mode))
-      .catch(() => {}); // keep the built-in default
+      .then((p) => live && setPrefs(p))
+      .catch(() => {}); // keep the built-in defaults
     return () => {
       live = false;
     };
@@ -252,20 +399,31 @@ function NewSession({
     if (defaultMode && !modeTouched.current) setMode(defaultMode);
   }, [defaultMode]);
 
+  useEffect(() => {
+    if (defaultModel && !modelTouched.current) setModel(defaultModel);
+  }, [defaultModel]);
+
   function pickMode(next: PermissionMode) {
     modeTouched.current = true;
     setMode(next);
   }
 
-  /** Saves the mode as this project's default if it has its own, else as the app-wide default. */
-  async function makeDefault() {
+  function pickModel(next: AgentModel) {
+    modelTouched.current = true;
+    setModel(next);
+  }
+
+  /** Saves a choice as this project's default if the project has its own, else as the app-wide default. */
+  async function makeDefault(
+    changes: { default_permission_mode: PermissionMode } | { default_model: AgentModel },
+    projectHasOwn: boolean,
+  ) {
     try {
-      if (projectDefault) {
-        await api.updateProject(project.id, { default_permission_mode: mode });
-        onProjectChanged(); // reloads the project, so `projectDefault` catches up
+      if (projectHasOwn) {
+        await api.updateProject(project.id, changes);
+        onProjectChanged(); // reloads the project, so its defaults catch up
       } else {
-        const saved = await api.updatePreferences({ default_permission_mode: mode });
-        setAppDefault(saved.default_permission_mode);
+        setPrefs(await api.updatePreferences(changes));
       }
     } catch (e) {
       setError(errorText(e));
@@ -283,6 +441,7 @@ function NewSession({
         prompt,
         task_id: taskId,
         permission_mode: mode,
+        model,
         max_budget_usd: budget ? Number(budget) : null,
         images: pasted.payload,
       });
@@ -294,6 +453,7 @@ function NewSession({
   }
 
   const openTasks = tasks.filter((t) => t.status !== "done");
+  const linkedImages = tasks.find((t) => t.id === taskId)?.images ?? [];
 
   return (
     <div className="run-view new-session">
@@ -317,35 +477,47 @@ function NewSession({
         />
         <ImageStrip images={pasted.images} onRemove={pasted.remove} />
         {pasted.error && <p className="error-text">{pasted.error}</p>}
-        <label>Linked task (its description is shared with the agent)</label>
+        <label>Linked task (its description and pictures are shared with the agent)</label>
         <select value={taskId ?? ""} onChange={(e) => setTaskId(e.target.value ? Number(e.target.value) : null)}>
           <option value="">None</option>
           {openTasks.map((t) => (
             <option key={t.id} value={t.id}>
-              T-{t.id}: {t.title}
+              {taskRef(project.key, t)}: {t.title}
             </option>
           ))}
         </select>
+        {linkedImages.length > 0 && (
+          <div className="linked-task-images faint">
+            The task's {linkedImages.length > 1 ? `${linkedImages.length} pictures go` : "picture goes"} with your prompt:
+            <MessageImages names={linkedImages} />
+          </div>
+        )}
         <div className="row">
           <div style={{ flex: 2 }}>
             <div className="mode-label">
+              <label>Model</label>
+              {defaultModel !== null && (
+                <DefaultLink
+                  isDefault={model === defaultModel}
+                  projectHasOwn={!!projectModel}
+                  what="model"
+                  onMakeDefault={() => void makeDefault({ default_model: model }, !!projectModel)}
+                />
+              )}
+            </div>
+            <ModelSelect value={model} onChange={pickModel} title={modelInfo(model)?.hint} />
+          </div>
+          <div style={{ flex: 2 }}>
+            <div className="mode-label">
               <label>Permissions</label>
-              {defaultMode !== null &&
-                (mode === defaultMode ? (
-                  <span className="faint">{projectDefault ? "Project default" : "Default"}</span>
-                ) : (
-                  <button
-                    className="link-btn"
-                    onClick={makeDefault}
-                    title={
-                      projectDefault
-                        ? "Preselect this mode for new sessions in this project"
-                        : "Preselect this mode for new sessions (projects can override it in Settings)"
-                    }
-                  >
-                    {projectDefault ? "Make project default" : "Make default"}
-                  </button>
-                ))}
+              {defaultMode !== null && (
+                <DefaultLink
+                  isDefault={mode === defaultMode}
+                  projectHasOwn={!!projectDefault}
+                  what="mode"
+                  onMakeDefault={() => void makeDefault({ default_permission_mode: mode }, !!projectDefault)}
+                />
+              )}
             </div>
             <ModeSelect value={mode} onChange={pickMode} title={modeInfo(mode)?.hint} />
           </div>
@@ -355,7 +527,7 @@ function NewSession({
           </div>
         </div>
         <p className="faint" style={{ fontSize: 12, margin: "6px 0 12px" }}>
-          {modeInfo(mode)?.hint}
+          {modelInfo(model)?.hint} {modeInfo(mode)?.hint}
         </p>
         {error && <p className="error-text">{error}</p>}
         <div className="row">
@@ -395,12 +567,17 @@ function readPanelOpen(): boolean {
 function SessionView({
   project,
   session,
+  taskLabel,
+  openAt,
   jump,
   onSent,
   onChanged,
 }: {
   project: Project;
   session: Session;
+  taskLabel?: string;
+  /** Where the conversation starts when it opens; a `jump` overrides it. Read once, on mount. */
+  openAt: SessionOpenScroll;
   jump: Jump | null;
   onSent: (run: AgentRun) => void;
   onChanged: () => void;
@@ -453,8 +630,15 @@ function SessionView({
   // ---- scrolling: follow new output only while the user is at the bottom
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
-  const follow = useRef<Follow>({ mode: "bottom" });
-  const [atBottom, setAtBottom] = useState(true);
+  // Opening at the last message anchors it (re-applied while the transcript loads) until the user scrolls.
+  const follow = useRef<Follow>(
+    openAt === "top"
+      ? { mode: "free" }
+      : openAt === "last_message"
+        ? { mode: "anchor", runId: session.runs[session.runs.length - 1].id }
+        : { mode: "bottom" },
+  );
+  const [atBottom, setAtBottom] = useState(openAt === "bottom");
   const [flash, setFlash] = useState<number | null>(null);
 
   const messageTop = (runId: number) => {
@@ -474,7 +658,12 @@ function SessionView({
   }, []);
 
   useLayoutEffect(() => {
-    const observer = new ResizeObserver(() => applyFollow());
+    const observer = new ResizeObserver(() => {
+      applyFollow();
+      // Content can grow without a scroll event (e.g. opened at the top), so keep "↓ Latest" in step.
+      const el = scroller.current;
+      if (el) setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX);
+    });
     if (content.current) observer.observe(content.current);
     if (scroller.current) observer.observe(scroller.current);
     return () => observer.disconnect();
@@ -524,10 +713,14 @@ function SessionView({
   // ---- composer
   const [text, setText] = useState("");
   const [nextMode, setNextMode] = useState<PermissionMode | null>(null);
+  const [nextModel, setNextModel] = useState<AgentModel | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const pasted = usePastedImages();
   const shownMode = active ? latest.permission_mode : nextMode ?? latest.permission_mode;
+  // Runs from before models could be chosen have none recorded; they ran on Opus 5.5.
+  const sessionModel = latest.model ?? BUILT_IN_DEFAULT_MODEL;
+  const shownModel = active ? sessionModel : nextModel ?? sessionModel;
   const canSend = !active && !!resumeFrom && (!!text.trim() || pasted.images.length > 0) && !sending;
 
   async function send() {
@@ -535,7 +728,7 @@ function SessionView({
     setActionError(null);
     setSending(true);
     try {
-      const run = await api.followUp(resumeFrom.id, text, shownMode, pasted.payload);
+      const run = await api.followUp(resumeFrom.id, text, shownMode, pasted.payload, nextModel);
       setText("");
       pasted.clear();
       follow.current = { mode: "bottom" };
@@ -576,7 +769,7 @@ function SessionView({
           {runLabel(runs[0])}
         </span>
         <span className="spacer" />
-        {latest.task_id && <span className="faint">T-{latest.task_id}</span>}
+        {taskLabel && <span className="faint">{taskLabel}</span>}
         {turns > 0 && <span className="faint">· {turns} turns</span>}
         {cost > 0 && <span className="faint">· ${cost.toFixed(4)}</span>}
         <button
@@ -644,6 +837,17 @@ function SessionView({
         />
         <ImageStrip images={pasted.images} onRemove={pasted.remove} />
         <div className="row">
+          <ModelSelect
+            className="small"
+            value={shownModel}
+            onChange={setNextModel}
+            disabled={active}
+            title={
+              active
+                ? "You can switch models for your next message once this turn finishes."
+                : `${modelInfo(shownModel)?.hint ?? ""} Applies from your next message on.`.trim()
+            }
+          />
           <ModeSelect
             className="small"
             value={shownMode}
@@ -654,17 +858,22 @@ function SessionView({
                 : modeInfo(shownMode)?.hint
             }
           />
-          <span className="faint" style={{ fontSize: 12 }}>
-            {latest.status === "waiting_approval" ? (
+          {latest.status === "waiting_approval" ? (
+            <span className="composer-status faint">
               <a href="#" onClick={(e) => (e.preventDefault(), scrollToLatest())}>
                 Waiting for your approval ↓
               </a>
-            ) : active ? (
-              "Working…"
-            ) : (
-              "Enter to send · Shift+Enter for a new line · Paste screenshots"
-            )}
-          </span>
+            </span>
+          ) : active ? (
+            <span className="composer-status faint">Working…</span>
+          ) : (
+            <span
+              className="composer-status composer-hint faint"
+              title="Enter to send · Shift+Enter for a new line · Paste screenshots"
+            >
+              Enter to send · Shift+Enter for a new line · Paste screenshots
+            </span>
+          )}
           <span className="spacer" />
           {active ? (
             <button className="btn small danger" onClick={() => void stop()}>
@@ -802,6 +1011,7 @@ function Turn({
         <MessageImages names={run.images ?? []} />
         {run.prompt.trim() && <div className="msg-text">{run.prompt}</div>}
         <div className="msg-meta">
+          {run.model && `${modelLabel(run.model)} · `}
           {modeInfo(run.permission_mode)?.label} · {timeAgo(run.created_at)}
         </div>
       </div>
@@ -906,7 +1116,9 @@ function EventItem({
     case "approval_decision":
       return <div className="ev-system">{p.allow ? "✓ Allowed" : `✗ Denied${p.message ? `: ${p.message}` : ""}`}</div>;
     case "result": {
-      const cost = p.total_cost_usd != null ? ` · $${Number(p.total_cost_usd).toFixed(4)}` : "";
+      // cost_usd is this run's share; older events only have the session's running total.
+      const runCost = p.cost_usd !== undefined ? p.cost_usd : p.total_cost_usd;
+      const cost = runCost != null ? ` · $${Number(runCost).toFixed(4)}` : "";
       const showText = p.result && (p.is_error || !hasText);
       return (
         <div className={p.is_error ? "ev-error" : "ev-done"}>
@@ -967,7 +1179,8 @@ function toolLabel(name: string): string {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function taskToolSummary(input: Record<string, any>): string {
   const parts: string[] = [];
-  if (input.task_id != null) parts.push(`T-${input.task_id}`);
+  // Agents name tasks by their project id (MER-12) or, sometimes, the bare number.
+  if (input.task_id != null) parts.push(typeof input.task_id === "number" ? `#${input.task_id}` : String(input.task_id));
   if (input.title) parts.push(input.title);
   if (input.status) parts.push(`→ ${String(input.status).replace("_", " ")}`);
   else if (input.include_done) parts.push("(incl. done)");

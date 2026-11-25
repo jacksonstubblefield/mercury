@@ -152,17 +152,21 @@ def test_doc_tools_create_search_read_update_delete(client):
     assert not updated["summary_stale"]
     assert _call(tools, "search_docs", query="postgres")[0]["results"][0]["doc_id"] == doc_id
 
-    msg, err = _call(tools, "update_doc", doc_id=dup["id"], superseded_by=foreign["id"])
+    foreign_ref = f"{other['key']}-D{foreign['number']}"
+    msg, err = _call(tools, "update_doc", doc_id=dup["id"], superseded_by=foreign_ref)
     assert err and "another doc in this project" in msg
     retired, err = _call(tools, "update_doc", doc_id=dup["id"], superseded_by=doc_id)
     assert not err and retired["status"] == "superseded" and retired["superseded_by"] == doc_id
 
     for name, extra in (("read_doc", {}), ("update_doc", {"title": "Mine"}), ("delete_doc", {})):
-        msg, err = _call(tools, name, doc_id=foreign["id"], **extra)
+        msg, err = _call(tools, name, doc_id=foreign_ref, **extra)
         assert err and "isn't in this project" in msg
 
+    assert _call(tools, "read_doc", doc_id=1)[0]["id"] == doc_id  # the bare number works too
+    stored = next(d for d in client.get(f"/api/projects/{p['id']}/docs").json() if d["title"] == "Storage design")
+    assert doc_id == f"{p['key']}-D{stored['number']}"
     assert _call(tools, "delete_doc", doc_id=doc_id)[0] == {"deleted": doc_id, "title": "Storage design"}
-    assert client.get(f"/api/docs/{doc_id}").status_code == 404
+    assert client.get(f"/api/docs/{stored['id']}").status_code == 404
 
 
 def test_read_doc_pages_long_docs(client):

@@ -5,7 +5,7 @@ import json
 
 from mercury import config
 
-DEFAULTS = {"default_permission_mode": "acceptEdits", "agent_settings_access": "change"}
+DEFAULTS = {"default_permission_mode": "acceptEdits", "default_model": "claude-opus-5-5", "agent_settings_access": "change", "agent_notifications": True, "session_open_scroll": "last_message"}
 
 
 def test_defaults_when_nothing_saved(client):
@@ -41,7 +41,7 @@ def test_patch_changes_only_what_is_given(client):
     client.put("/api/preferences", json={**DEFAULTS, "agent_settings_access": "read"})
     r = client.patch("/api/preferences", json={"default_permission_mode": "plan"})
     assert r.status_code == 200, r.text
-    assert r.json() == {"default_permission_mode": "plan", "agent_settings_access": "read"}
+    assert r.json() == {**DEFAULTS, "default_permission_mode": "plan", "agent_settings_access": "read"}
 
 
 def test_patch_rejects_unknown_keys_and_bad_values(client):
@@ -50,6 +50,14 @@ def test_patch_rejects_unknown_keys_and_bad_values(client):
     r = client.patch("/api/preferences", json={"agent_settings_access": "admin"})
     assert r.status_code == 422 and "agent_settings_access" in r.json()["detail"]
     assert client.get("/api/preferences").json() == DEFAULTS  # nothing was saved
+
+
+def test_session_open_scroll(client):
+    for value in ("top", "bottom", "last_message"):
+        r = client.patch("/api/preferences", json={"session_open_scroll": value})
+        assert r.status_code == 200, r.text
+        assert r.json()["session_open_scroll"] == value
+    assert client.patch("/api/preferences", json={"session_open_scroll": "middle"}).status_code == 422
 
 
 # --------------------------------------------------------------------------- agent tools

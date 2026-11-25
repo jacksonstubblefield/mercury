@@ -1,12 +1,15 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { api, openExternal } from "../api";
 import { timeAgo, useLoader, usePolling } from "../hooks";
 import { ACTIVE_STATUSES, groupSessions, plainExcerpt, runLabel, sessionCost, sessionSummary, type Session } from "../sessions";
+import { taskRef } from "../refs";
 import { TASK_COLUMNS, type Task, type TaskPriority, type TaskStatus } from "../types";
 import { Markdown } from "./Markdown";
+import { ImageStrip, MAX_IMAGES, MessageImages, usePastedImages } from "./PastedImages";
 
 interface Props {
   task: Task;
+  projectKey: string;
   canRunAgent: boolean;
   onClose: () => void;
   onSaved: () => void;
@@ -14,25 +17,59 @@ interface Props {
   onOpenRun: (runId: number) => void;
 }
 
-export function TaskModal({ task, canRunAgent, onClose, onSaved, onRunAgent, onOpenRun }: Props) {
+export function TaskModal({ task, projectKey, canRunAgent, onClose, onSaved, onRunAgent, onOpenRun }: Props) {
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description);
   const [status, setStatus] = useState<TaskStatus>(task.status);
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
   const [preview, setPreview] = useState(false);
-  const dirty = title !== task.title || description !== task.description || status !== task.status || priority !== task.priority;
+  // Pictures already saved on the task that are still kept, and new ones waiting for Save.
+  const [kept, setKept] = useState<string[]>(task.images ?? []);
+  const pasted = usePastedImages(MAX_IMAGES - kept.length, "one task");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const imagesChanged = kept.join() !== (task.images ?? []).join();
+  const dirty =
+    title !== task.title ||
+    description !== task.description ||
+    status !== task.status ||
+    priority !== task.priority ||
+    imagesChanged ||
+    pasted.images.length > 0;
 
   const runs = useLoader(() => api.runs(task.project_id, task.id), [task.project_id, task.id]);
   const sessions = useMemo(() => groupSessions(runs.data ?? []), [runs.data]);
   usePolling(runs.reload, 3000, sessions.some((s) => ACTIVE_STATUSES.has(s.latest.status)));
 
-  async function save(): Promise<Task> {
-    return api.updateTask(task.id, { title, description, status, priority });
+  /** Saves the task; null (with the error shown) if that failed. */
+  async function save(): Promise<Task | null> {
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await api.updateTask(task.id, {
+        title,
+        description,
+        status,
+        priority,
+        // Only send the list when it changed, so pictures added elsewhere meanwhile aren't dropped.
+        ...(imagesChanged ? { images: kept } : {}),
+        ...(pasted.images.length ? { add_images: pasted.payload } : {}),
+      });
+      pasted.clear();
+      setKept(saved.images);
+      return saved;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return null;
+    } finally {
+      setSaving(false);
+    }
   }
 
   /** Open a session in the Agents tab, keeping any edits made here. */
   async function openSession(session: Session) {
-    if (dirty && title.trim()) await save();
+    if (dirty && title.trim() && !(await save())) return;
     onOpenRun(session.latest.id);
   }
 
@@ -44,9 +81,10 @@ export function TaskModal({ task, canRunAgent, onClose, onSaved, onRunAgent, onO
 
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal">
+      {/* Screenshots can be pasted or dropped anywhere in the modal. */}
+      <div className="modal" {...pasted.handlers}>
         <div className="row">
-          <span className="faint">T-{task.id}</span>
+          <span className="faint">{taskRef(projectKey, task)}</span>
           {task.github_url && (
             <a href="#" onClick={(e) => (e.preventDefault(), openExternal(task.github_url!))}>
               GitHub #{task.github_issue_number}
@@ -94,6 +132,41 @@ export function TaskModal({ task, canRunAgent, onClose, onSaved, onRunAgent, onO
           <textarea style={{ minHeight: 220 }} value={description} onChange={(e) => setDescription(e.target.value)} />
         )}
 
+        <div className="row" style={{ marginTop: 10 }}>
+          <label style={{ margin: 0 }}>
+            Pictures{kept.length + pasted.images.length > 0 && <span className="faint"> ({kept.length + pasted.images.length})</span>}{" "}
+            — sent to the agent with the task
+          </label>
+          <span className="spacer" />
+          <button
+            className="btn small ghost"
+            disabled={kept.length + pasted.images.length >= MAX_IMAGES}
+            onClick={() => fileInput.current?.click()}
+          >
+            Add…
+          </button>
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/*"
+            multiple
+            hidden
+            onChange={(e) => {
+              void pasted.add([...(e.target.files ?? [])]);
+              e.target.value = ""; // so picking the same file again still fires
+            }}
+          />
+        </div>
+        {kept.length + pasted.images.length > 0 ? (
+          <div className="task-images">
+            <MessageImages names={kept} onRemove={(name) => setKept(kept.filter((n) => n !== name))} />
+            <ImageStrip images={pasted.images} onRemove={pasted.remove} />
+          </div>
+        ) : (
+          <p className="faint task-images-hint">Paste or drop screenshots anywhere here, or use Add….</p>
+        )}
+        {pasted.error && <p className="error-text">{pasted.error}</p>}
+
         {sessions.length > 0 && (
           <>
             <label>
@@ -101,12 +174,13 @@ export function TaskModal({ task, canRunAgent, onClose, onSaved, onRunAgent, onO
             </label>
             <div className="task-sessions">
               {sessions.map((s) => (
-                <TaskSession key={s.rootId} session={s} task={task} onOpen={() => void openSession(s)} />
+                <TaskSession key={s.rootId} session={s} task={task} projectKey={projectKey} onOpen={() => void openSession(s)} />
               ))}
             </div>
           </>
         )}
         {runs.error && <p className="error-text">Couldn't load this task's agent sessions: {runs.error}</p>}
+        {error && <p className="error-text">Couldn't save: {error}</p>}
 
         <div className="modal-actions">
           <button className="btn danger" onClick={remove}>
@@ -115,16 +189,25 @@ export function TaskModal({ task, canRunAgent, onClose, onSaved, onRunAgent, onO
           <span className="spacer" />
           <button
             className="btn"
-            disabled={!canRunAgent}
+            disabled={!canRunAgent || saving}
             title={canRunAgent ? "Hand this task to a Claude agent" : "Set a local repo folder in project settings first"}
-            onClick={async () => onRunAgent(await save())}
+            onClick={async () => {
+              const saved = await save();
+              if (saved) onRunAgent(saved);
+            }}
           >
             ▶ Run agent
           </button>
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button className="btn primary" disabled={!title.trim()} onClick={async () => (await save(), onSaved())}>
+          <button
+            className="btn primary"
+            disabled={!title.trim() || saving}
+            onClick={async () => {
+              if (await save()) onSaved();
+            }}
+          >
             Save
           </button>
         </div>
@@ -140,14 +223,26 @@ const STATUS_NOTE: Partial<Record<string, string>> = {
   cancelled: "Stopped before Claude wrapped up.",
 };
 
-function TaskSession({ session, task, onOpen }: { session: Session; task: Task; onOpen: () => void }) {
+function TaskSession({
+  session,
+  task,
+  projectKey,
+  onOpen,
+}: {
+  session: Session;
+  task: Task;
+  projectKey: string;
+  onOpen: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const { runs, latest } = session;
   const cost = sessionCost(session);
   const summary = sessionSummary(session);
   const active = ACTIVE_STATUSES.has(latest.status);
   // "Run agent" seeds every session with the same prompt; only show prompts the user actually wrote.
-  const opener = runs[0].prompt.startsWith(`Complete task T-${task.id}:`) ? null : runLabel(runs[0]) || null;
+  // (Sessions from before per-project ids were seeded with "Complete task T-<global id>:".)
+  const seeded = [`Complete task ${taskRef(projectKey, task)}:`, `Complete task T-${task.id}:`];
+  const opener = seeded.some((p) => runs[0].prompt.startsWith(p)) ? null : runLabel(runs[0]) || null;
   const followUps = runs.length - 1;
   const excerpt = summary.kind === "none" ? "" : plainExcerpt(summary.text);
   const truncated = summary.kind !== "none" && excerpt !== summary.text.replace(/\s+/g, " ").trim();

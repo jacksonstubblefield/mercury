@@ -69,6 +69,15 @@ class PermissionMode(str, Enum):
     bypassPermissions = "bypassPermissions"  # no approvals at all
 
 
+class AgentModel(str, Enum):
+    """Claude models offered for agent sessions. Mirror the list in frontend/src/agentModels.ts."""
+
+    opus_5_5 = "claude-opus-5-5"
+    sonnet_5_5 = "claude-sonnet-5-5"
+    haiku_5_5 = "claude-haiku-5-5"
+    fable_5_2 = "claude-fable-5-2"
+
+
 # --------------------------------------------------------------------------- projects
 
 
@@ -81,30 +90,41 @@ class ProjectBase(SQLModel):
     color: str = "#7c8cff"
     # Preselected for new agent sessions in this project. None: the app-wide default (Preferences).
     default_permission_mode: Optional[PermissionMode] = None
+    # Preselected model for new agent sessions in this project. None: the app-wide default (Preferences).
+    default_model: Optional[AgentModel] = None
 
 
 class Project(ProjectBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    # Unique, 2-4 characters (services/refs.py): the prefix of the project's task and doc ids, e.g. MER-12.
+    # Generated from the name when a project is created without one.
+    key: Optional[str] = Field(default=None, max_length=4)
+    # The last task / doc number handed out in this project; numbers aren't reused.
+    task_seq: int = 0
+    doc_seq: int = 0
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
 
 class ProjectCreate(ProjectBase):
-    pass
+    key: Optional[str] = None  # None: generated from the name
 
 
 class ProjectUpdate(SQLModel):
     name: Optional[str] = None
+    key: Optional[str] = None
     description: Optional[str] = None
     repo_path: Optional[str] = None
     github_repo: Optional[str] = None
     status: Optional[ProjectStatus] = None
     color: Optional[str] = None
     default_permission_mode: Optional[PermissionMode] = None  # send null to use the app default
+    default_model: Optional[AgentModel] = None  # send null to use the app default
 
 
 class ProjectRead(ProjectBase):
     id: int
+    key: str
     created_at: datetime
     updated_at: datetime
     open_tasks: int = 0
@@ -125,14 +145,19 @@ class TaskBase(SQLModel):
 class Task(TaskBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True, ondelete="CASCADE")
+    # Per-project id, shown as "<project key>-<number>" (services/refs.py assigns it on insert).
+    number: Optional[int] = None
     github_issue_number: Optional[int] = None
     github_url: Optional[str] = None
+    # Pictures attached to the task (attachment names, see services/attachments.py). A run started on the
+    # task gets its own copies, sent with its first message.
+    images: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False, server_default="[]"))
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
 
 class TaskCreate(TaskBase):
-    pass
+    add_images: list[str] = []  # base64 PNG/JPEG/GIF/WebP; the type is read from the bytes
 
 
 class TaskUpdate(SQLModel):
@@ -141,6 +166,9 @@ class TaskUpdate(SQLModel):
     status: Optional[TaskStatus] = None
     priority: Optional[TaskPriority] = None
     position: Optional[float] = None
+    # The task's pictures to keep, in order (names from Task.images); ones left out are deleted.
+    images: Optional[list[str]] = None
+    add_images: list[str] = []  # new pictures, base64 as in TaskCreate, appended after the kept ones
 
 
 # --------------------------------------------------------------------------- docs
@@ -177,6 +205,8 @@ class DocBase(SQLModel):
 class Doc(DocBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True, ondelete="CASCADE")
+    # Per-project id, shown as "<project key>-D<number>" (services/refs.py assigns it on insert).
+    number: Optional[int] = None
     origin: DocOrigin = DocOrigin.user
     # content_hash() of title + body, kept current by services/doc_store.save_doc.
     content_hash: str = ""
@@ -271,6 +301,7 @@ class MercuryMeta(SQLModel, table=True):
 class DocRead(DocBase):
     id: int
     project_id: int
+    number: int
     origin: DocOrigin
     summary: str
     summary_stale: bool
@@ -281,6 +312,7 @@ class DocRead(DocBase):
 
 class DocListItem(SQLModel):
     id: int
+    number: int
     title: str
     pinned: bool
     status: DocStatus
@@ -316,6 +348,8 @@ class DocMove(SQLModel):
 class AgentRunBase(SQLModel):
     prompt: str
     task_id: Optional[int] = None
+    # The Claude model id. A str rather than AgentModel so runs made with models since dropped from the
+    # list still load; None on runs from before models were chosen (they ran on config.DEFAULT_AGENT_MODEL).
     model: Optional[str] = None
     permission_mode: PermissionMode = PermissionMode.acceptEdits
     max_budget_usd: Optional[float] = None
@@ -332,15 +366,22 @@ class AgentRun(AgentRunBase, table=True):
     images: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False, server_default="[]"))
     result: Optional[str] = None
     error: Optional[str] = None
+    # This run's own cost. The SDK reports a resumed session's running total (total_cost_usd), so a
+    # follow-up's cost is that total minus the nearest earlier run's (session_cost_usd); see agent_runner.
     cost_usd: Optional[float] = None
+    session_cost_usd: Optional[float] = None  # the session's running total as the SDK reported it
     num_turns: Optional[int] = None
     created_at: datetime = Field(default_factory=utcnow)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+    # Whether the user has looked at this run since it finished. Unseen finished work runs stay in the
+    # sidebar's Sessions list until opened. Rows from before this column existed count as seen (db.py).
+    seen: bool = False
 
 
 class AgentRunCreate(AgentRunBase):
     permission_mode: Optional[PermissionMode] = None  # None: the project's default, else the app's
+    model: Optional[AgentModel] = None  # None: the project's default, else the app's
     images: list[str] = []  # base64 PNG/JPEG/GIF/WebP; the type is read from the bytes
 
 
@@ -351,6 +392,7 @@ class OrganizeRequest(SQLModel):
 class AgentFollowUp(SQLModel):
     prompt: str
     permission_mode: Optional[PermissionMode] = None
+    model: Optional[AgentModel] = None  # None: keep the session's model
     images: list[str] = []  # base64, as in AgentRunCreate
 
 
@@ -367,6 +409,21 @@ class AgentEvent(SQLModel, table=True):
     kind: str
     payload: str  # JSON
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class SessionAttention(SQLModel):
+    """A session shown in the sidebar: working, waiting on the user, or finished and not yet looked at."""
+
+    project_id: int
+    root_run_id: int  # the session's first run; its prompt names the session
+    run_id: int  # the session's newest run, whose status this is
+    status: RunStatus
+    title: str
+    image_count: int = 0  # images pasted with the first prompt, for sessions started with only an image
+    pending_tool: Optional[str] = None  # the tool waiting for approval, when status is waiting_approval
+    result: Optional[str] = None  # the start of the agent's wrap-up, when finished
+    error: Optional[str] = None
+    finished_at: Optional[datetime] = None
 
 
 class ApprovalDecision(SQLModel):
@@ -505,6 +562,14 @@ class AgentSettingsAccess(str, Enum):
     change = "change"  # agents can also change them; each change follows the run's permission mode
 
 
+class SessionOpenScroll(str, Enum):
+    """Where an agent session's conversation is scrolled to when the user opens it."""
+
+    top = "top"  # the start of the conversation
+    last_message = "last_message"  # the user's most recent message, with the reply below it
+    bottom = "bottom"  # the end of the conversation (the latest output)
+
+
 class Preferences(SQLModel):
     """App-wide settings (the Settings page). Kept in preferences.json next to the database, like `Appearance`.
 
@@ -516,8 +581,23 @@ class Preferences(SQLModel):
         default=PermissionMode.acceptEdits,
         description="Permission mode preselected for new agent sessions in projects that don't set their own.",
     )
+    default_model: AgentModel = Field(
+        default=AgentModel.opus_5_5,
+        description="Claude model preselected for new agent sessions in projects that don't set their own. "
+        "The user can still pick another model for each session.",
+    )
     agent_settings_access: AgentSettingsAccess = Field(
         default=AgentSettingsAccess.change,
         description="Whether agents may read (read) or also change (change) these settings and the appearance "
         "(themes, fonts), or neither (off).",
+    )
+    agent_notifications: bool = Field(
+        default=True,
+        description="Show a desktop notification when an agent session finishes or needs the user's answer "
+        "while the Mercury window isn't in focus.",
+    )
+    session_open_scroll: SessionOpenScroll = Field(
+        default=SessionOpenScroll.last_message,
+        description="Where an agent conversation opens when the user selects it: at the top, at the user's most "
+        "recent message (last_message), or at the bottom. Links to a specific message still go to that message.",
     )

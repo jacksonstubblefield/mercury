@@ -15,6 +15,7 @@ Mercury is a desktop project manager with Claude coding agents built in. It has 
   - The SQLModel tables and API schemas both live in `backend/mercury/models.py`.
   - There is no migration tool yet, and tables are created with `create_all`. If you add a column, the user's existing `~/.mercury/mercury.db` won't get it, so add it to `_ADDED_COLUMNS` in `db.py`.
   - Endpoints that call `RunManager.start` must be `async def`, because they need the running event loop.
+  - Tasks and docs have a global `id` (used by the REST API and foreign keys) and a per-project `number`, shown with the project key as `MER-12` / `MER-D3`. Numbers are assigned automatically on insert (`services/refs.py`). Use the refs, not the ids, in anything agents or users read.
 - **Agent runs**
   - `serialize_message` in `services/agent_runner.py` maps Agent SDK messages to `AgentEvent` kinds.
   - If you add a kind, also render it in `EventItem` in `frontend/src/components/AgentsTab.tsx`.

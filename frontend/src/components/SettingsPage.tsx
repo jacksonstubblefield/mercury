@@ -2,7 +2,8 @@ import { useCallback, useState } from "react";
 import { api } from "../api";
 import { useLoader, usePolling } from "../hooks";
 import { MODES, modeInfo } from "../permissions";
-import type { AgentSettingsAccess, PermissionMode, Preferences } from "../types";
+import { AGENT_MODELS, modelInfo } from "../agentModels";
+import type { AgentModel, AgentSettingsAccess, PermissionMode, Preferences, SessionOpenScroll } from "../types";
 
 // Agents can change settings too (get_settings / update_settings), so keep the page current.
 const POLL_MS = 5000;
@@ -17,7 +18,21 @@ const ACCESS: { value: AgentSettingsAccess; label: string; hint: string }[] = [
   { value: "off", label: "No access", hint: "Agents can't see or change the settings." },
 ];
 
-type SaveStatus = "idle" | "saving" | "saved" | "error";
+const OPEN_SCROLL: { value: SessionOpenScroll; label: string; hint: string }[] = [
+  { value: "top", label: "Start at the top", hint: "Sessions open scrolled to the top." },
+  {
+    value: "last_message",
+    label: "Start at my last message (default)",
+    hint: "Sessions open at the last message you sent, with Claude's reply below it.",
+  },
+  {
+    value: "bottom",
+    label: "Start at the bottom",
+    hint: "Sessions open scrolled to the bottom, where the latest output, summary or question is.",
+  },
+];
+
+type SaveStatus ="idle" | "saving" | "saved" | "error";
 
 /** App-wide settings. Theme settings live on the Appearance page. */
 export function SettingsPage() {
@@ -64,6 +79,22 @@ export function SettingsPage() {
           <div className="settings">
             <div className="card">
               <h3>Agent sessions</h3>
+              <label htmlFor="default-model">Default model for new sessions</label>
+              <select
+                id="default-model"
+                value={p.default_model}
+                onChange={(e) => void change({ default_model: e.target.value as AgentModel })}
+              >
+                {AGENT_MODELS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+              <p className="faint settings-hint">
+                {modelInfo(p.default_model)?.hint} Projects can override this in Project settings, and you can pick
+                another model for each session.
+              </p>
               <label htmlFor="default-mode">Default permissions for new sessions</label>
               <select
                 id="default-mode"
@@ -79,6 +110,35 @@ export function SettingsPage() {
               <p className="faint settings-hint">
                 {modeInfo(p.default_permission_mode)?.hint} Projects can override this in Project settings.
               </p>
+              <label htmlFor="open-scroll">When you open a session</label>
+              <select
+                id="open-scroll"
+                value={p.session_open_scroll}
+                onChange={(e) => void change({ session_open_scroll: e.target.value as SessionOpenScroll })}
+              >
+                {OPEN_SCROLL.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <p className="faint settings-hint">
+                {OPEN_SCROLL.find((o) => o.value === p.session_open_scroll)?.hint} Links to a specific message still
+                open at that message.
+              </p>
+              <label className="settings-choice" style={{ marginTop: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={p.agent_notifications}
+                  onChange={(e) => void change({ agent_notifications: e.target.checked })}
+                />
+                <span>
+                  <b>Desktop notifications</b>
+                  <span className="faint">
+                    Notify me when a session finishes or needs my answer while Mercury is in the background.
+                  </span>
+                </span>
+              </label>
             </div>
 
             <div className="card">

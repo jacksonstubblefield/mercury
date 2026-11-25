@@ -1,7 +1,9 @@
-"""Images the user pastes into an agent prompt (usually screenshots).
+"""Images the user attaches to an agent prompt or a task (usually screenshots).
 
 They're stored as files under ``<data dir>/attachments`` with random names; an
-AgentRun keeps the names in ``images``. When the run starts they're sent to
+AgentRun or Task keeps the names in ``images``. Each file belongs to exactly one
+owner (a run started on a task gets its own copies of the task's pictures), so
+deleting the owner can delete its files. When a run starts they're sent to
 Claude as image content blocks next to the prompt text.
 """
 
@@ -60,15 +62,15 @@ def _decode(data: str) -> bytes:
         raise AttachmentError("An image wasn't valid base64.") from exc
 
 
-def save_images(images: Iterable[str]) -> list[str]:
+def save_images(images: Iterable[str], limit: int = MAX_IMAGES, where: str = "one message") -> list[str]:
     """Validate and store base64 images; returns their attachment names.
 
     The media type is taken from the bytes themselves, not from the client.
     Nothing is stored unless every image is valid.
     """
     decoded = [_decode(d) for d in images]
-    if len(decoded) > MAX_IMAGES:
-        raise AttachmentError(f"Attach at most {MAX_IMAGES} images to one message.")
+    if len(decoded) > limit:
+        raise AttachmentError(f"Attach at most {limit} images to {where}.")
     blobs: list[tuple[bytes, str]] = []
     for raw in decoded:
         media_type = sniff(raw)
@@ -117,6 +119,32 @@ def content_blocks(prompt: str, names: Iterable[str]) -> list[dict]:
         )
     if prompt.strip():  # the API rejects empty text blocks
         blocks.append({"type": "text", "text": prompt})
+    return blocks
+
+
+def copy(names: Iterable[str]) -> list[str]:
+    """Fresh copies of attachments, for a new owner. Missing files are skipped."""
+    folder = attachments_dir()
+    copies = []
+    for name in names:
+        path = path_for(name)
+        if path is None:
+            continue
+        new = f"{uuid.uuid4().hex}.{name.rsplit('.', 1)[-1]}"
+        (folder / new).write_bytes(path.read_bytes())
+        copies.append(new)
+    return copies
+
+
+def image_blocks_for_tool(names: Iterable[str]) -> list[dict]:
+    """MCP tool-result image blocks for attachments that still exist."""
+    blocks = []
+    for name in names:
+        path = path_for(name)
+        if path is not None:
+            blocks.append(
+                {"type": "image", "data": base64.b64encode(path.read_bytes()).decode("ascii"), "mimeType": media_type_for(name)}
+            )
     return blocks
 
 

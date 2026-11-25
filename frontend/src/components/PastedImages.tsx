@@ -5,7 +5,7 @@ import { api } from "../api";
 const ACCEPTED = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 /** The API takes at most 5 MB of base64 per image (3.75 MB of bytes); matches the backend's limit. */
 const MAX_BYTES = (5 * 1024 * 1024 * 3) / 4;
-const MAX_IMAGES = 10;
+export const MAX_IMAGES = 10;
 
 let nextId = 0;
 
@@ -60,8 +60,10 @@ function imageFiles(data: DataTransfer): File[] {
 /**
  * Screenshots the user pastes or drops into a composer. Spread `handlers` onto the textarea
  * (or a wrapper), show `images` with <ImageStrip>, and send `payload` with the message.
+ * `limit` is how many may be added (a task counts the pictures it already has); `where` names
+ * what they're attached to, for the error message.
  */
-export function usePastedImages() {
+export function usePastedImages(limit = MAX_IMAGES, where = "one message") {
   const [images, setImages] = useState<PastedImage[]>([]);
   const [error, setError] = useState<string | null>(null);
   // The latest list, for checks between awaits (state may not have re-rendered yet).
@@ -71,12 +73,15 @@ export function usePastedImages() {
     setImages(next);
   }, []);
 
+  const room = useRef({ limit, where });
+  room.current = { limit, where };
+
   const add = useCallback(
     async (files: File[]) => {
       setError(null);
       for (const file of files) {
-        if (current.current.length >= MAX_IMAGES) {
-          setError(`You can attach up to ${MAX_IMAGES} images to one message.`);
+        if (current.current.length >= room.current.limit) {
+          setError(`You can attach up to ${MAX_IMAGES} images to ${room.current.where}.`);
           return;
         }
         try {
@@ -114,6 +119,8 @@ export function usePastedImages() {
     error,
     handlers,
     payload: images.map((i) => i.data),
+    /** Add picked files (e.g. from an <input type="file">). */
+    add,
     remove: (id: string) => update(current.current.filter((i) => i.id !== id)),
     clear: () => {
       update([]);
@@ -141,8 +148,8 @@ export function ImageStrip({ images, onRemove }: { images: PastedImage[]; onRemo
   );
 }
 
-/** The images sent with a message, in the transcript. */
-export function MessageImages({ names }: { names: string[] }) {
+/** Stored images (attachment names): the ones sent with a message, or a task's pictures. */
+export function MessageImages({ names, onRemove }: { names: string[]; onRemove?: (name: string) => void }) {
   const [open, setOpen] = useState<string | null>(null);
   if (!names.length) return null;
   return (
@@ -150,6 +157,11 @@ export function MessageImages({ names }: { names: string[] }) {
       {names.map((name) => (
         <div key={name} className="image-thumb">
           <img src={api.attachmentUrl(name)} alt="Attached image" loading="lazy" onClick={() => setOpen(api.attachmentUrl(name))} />
+          {onRemove && (
+            <button className="image-remove" title="Remove" aria-label="Remove image" onClick={() => onRemove(name)}>
+              ×
+            </button>
+          )}
         </div>
       ))}
       {open && <Lightbox src={open} onClose={() => setOpen(null)} />}

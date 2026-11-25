@@ -14,7 +14,7 @@ function resetLabel(iso: string): string {
   return `Resets ${day} at ${time}`;
 }
 
-function countdown(iso: string): string {
+export function countdown(iso: string): string {
   const s = Math.max(0, Math.round((new Date(iso).getTime() - Date.now()) / 1000));
   const d = Math.floor(s / 86400);
   const h = Math.floor((s % 86400) / 3600);
@@ -24,7 +24,7 @@ function countdown(iso: string): string {
   return `in ${m}m`;
 }
 
-function level(pct: number): "ok" | "warn" | "crit" {
+export function level(pct: number): "ok" | "warn" | "crit" {
   return pct >= 90 ? "crit" : pct >= 75 ? "warn" : "ok";
 }
 

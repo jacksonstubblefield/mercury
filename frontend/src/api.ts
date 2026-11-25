@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  AgentModel,
   AgentRun,
   Appearance,
   ClaudeUsage,
@@ -25,7 +26,9 @@ import type {
   ScmFileContent,
   ScmRepoStatus,
   ScmStatus,
+  SessionAttention,
   Task,
+  TaskChanges,
   Theme,
 } from "./types";
 
@@ -81,11 +84,13 @@ export const api = {
   createProject: (body: ProjectInput) => post<Project>("/api/projects", body),
   updateProject: (id: number, body: ProjectInput) => patch<Project>(`/api/projects/${id}`, body),
   deleteProject: (id: number) => del(`/api/projects/${id}`),
+  suggestProjectKey: (name: string) =>
+    get<{ key: string }>(`/api/projects/suggest-key?name=${encodeURIComponent(name)}`),
   git: (id: number) => get<GitSummary>(`/api/projects/${id}/git`),
 
   tasks: (projectId: number) => get<Task[]>(`/api/projects/${projectId}/tasks`),
-  createTask: (projectId: number, body: Partial<Task>) => post<Task>(`/api/projects/${projectId}/tasks`, body),
-  updateTask: (id: number, body: Partial<Task>) => patch<Task>(`/api/tasks/${id}`, body),
+  createTask: (projectId: number, body: TaskChanges) => post<Task>(`/api/projects/${projectId}/tasks`, body),
+  updateTask: (id: number, body: TaskChanges) => patch<Task>(`/api/tasks/${id}`, body),
   deleteTask: (id: number) => del(`/api/tasks/${id}`),
 
   docs: (projectId: number) => get<DocListItem[]>(`/api/projects/${projectId}/docs`),
@@ -158,7 +163,7 @@ export const api = {
       prompt: string;
       task_id?: number | null;
       permission_mode: PermissionMode;
-      model?: string | null;
+      model?: AgentModel | null;
       max_budget_usd?: number | null;
       /** base64 image data (no data: prefix) */
       images?: string[];
@@ -167,8 +172,12 @@ export const api = {
   /** Starts an organizer run, or returns the one already organizing that target. */
   organize: (projectId: number, target: "board" | "docs") => post<AgentRun>(`/api/projects/${projectId}/organize`, { target }),
   cancelRun: (id: number) => post<AgentRun>(`/api/runs/${id}/cancel`),
-  followUp: (id: number, prompt: string, permission_mode?: PermissionMode, images?: string[]) =>
-    post<AgentRun>(`/api/runs/${id}/follow-up`, { prompt, permission_mode, images }),
+  /** Sessions across all projects that are running, waiting on the user, or finished and unseen. */
+  attention: () => get<SessionAttention[]>("/api/sessions/attention"),
+  /** The user has looked at a finished run (ignored for runs still going). */
+  markSeen: (id: number) => post<AgentRun>(`/api/runs/${id}/seen`),
+  followUp: (id: number, prompt: string, permission_mode?: PermissionMode, images?: string[], model?: AgentModel | null) =>
+    post<AgentRun>(`/api/runs/${id}/follow-up`, { prompt, permission_mode, images, model }),
   attachmentUrl: (name: string) => `/api/attachments/${encodeURIComponent(name)}`,
   setRunMode: (id: number, permission_mode: PermissionMode) =>
     post<AgentRun>(`/api/runs/${id}/permission-mode`, { permission_mode }),
@@ -185,6 +194,10 @@ export const api = {
 export interface MercuryBridge {
   pickFolder(): Promise<string | null>;
   openExternal(url: string): Promise<void>;
+  /** Show a desktop notification and flash the taskbar; clicking it fires onOpenRun. */
+  notify(n: { title: string; body: string; projectId: number; runId: number }): void;
+  /** Called when the user clicks a notification. Returns an unsubscribe function. */
+  onOpenRun(callback: (target: { projectId: number; runId: number }) => void): () => void;
 }
 
 declare global {

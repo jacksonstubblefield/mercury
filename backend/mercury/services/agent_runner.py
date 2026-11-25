@@ -47,7 +47,7 @@ from ..models import (
     TaskStatus,
     utcnow,
 )
-from . import attachments, organizer
+from . import attachments, organizer, refs
 from .agent_memory import docs_instructions, memory_hooks
 from .mercury_tools import ORGANIZER_TASK_TOOLS, SETTINGS_TOOLS
 from .mercury_tools import PREAPPROVED_TOOL_NAMES as MERCURY_TOOLS
@@ -94,6 +94,8 @@ def _tool_result_text(content: Any) -> str:
         for item in content:
             if isinstance(item, dict) and item.get("type") == "text":
                 parts.append(item.get("text", ""))
+            elif isinstance(item, dict) and item.get("type") == "image":
+                parts.append("[image]")  # keep base64 out of the transcript
             else:
                 parts.append(json.dumps(item, default=str))
         return "\n".join(parts)
@@ -184,18 +186,26 @@ def build_system_append(project: Project, task: Task | None) -> str:
     if project.github_repo:
         lines.append(f"GitHub repository: {project.github_repo}")
     if task is not None:
-        lines.append(f"You are working on task #{task.id}: {task.title}")
+        lines.append(f"You are working on task {refs.task_ref(project.key, task.number)}: {task.title}")
         if task.description:
             lines.append(f"Task details:\n{task.description}")
+        if task.images:
+            n = len(task.images)
+            lines.append(
+                f"The task has {n} picture{'s' if n != 1 else ''} attached (screenshots and the like). A session "
+                "started on the task gets them with its first message, before the text; to look at them again, call "
+                f"mcp__{MERCURY_SERVER}__view_task_images."
+            )
     lines.append(
+        f"Tasks and docs have per-project ids: {project.key}-12 is task 12 and {project.key}-D3 is doc 3 of this project. "
         "You can read and manage this project's tasks on the Mercury board with the "
-        f"mcp__{MERCURY_SERVER}__list_tasks, create_task and update_task tools. When the user asks you to plan, "
+        f"mcp__{MERCURY_SERVER}__list_tasks, create_task and update_task tools (view_task_images shows a task's pictures). When the user asks you to plan, "
         "break down or record work, create the tasks directly rather than giving them a list to paste. "
         "When you finish a task's work and have verified it, mark it done with update_task."
     )
     if task is not None:
         lines.append(
-            f"Task #{task.id} moves to Review automatically when this run succeeds; mark it done yourself "
+            f"Task {refs.task_ref(project.key, task.number)} moves to Review automatically when this run succeeds; mark it done yourself "
             "only if the user asked you to, or the work needs no review."
         )
     lines.append(
@@ -246,6 +256,10 @@ class RunManager:
 
     def start(self, run_id: int) -> None:
         self._tasks[run_id] = asyncio.create_task(self._execute(run_id), name=f"agent-run-{run_id}")
+
+    def pending_tool(self, run_id: int) -> str | None:
+        """The tool a run is waiting for the user to approve, if any."""
+        return next((p.tool_name for p in self._approvals.values() if p.run_id == run_id), None)
 
     def is_running(self, run_id: int) -> bool:
         task = self._tasks.get(run_id)
@@ -361,6 +375,22 @@ class RunManager:
                 s.add(task)
                 s.commit()
 
+    @staticmethod
+    def _session_cost_before(run: AgentRun, session_id: str | None) -> float:
+        """The session's running total as of the nearest earlier run in this chain that recorded one.
+
+        Runs that were cancelled or crashed record no total; their spend lands on the next run."""
+        parent_id = run.parent_run_id
+        with Session(get_engine()) as s:
+            while parent_id is not None:
+                parent = s.get(AgentRun, parent_id)
+                if parent is None:
+                    break
+                if parent.session_cost_usd is not None and parent.session_id == session_id:
+                    return parent.session_cost_usd
+                parent_id = parent.parent_run_id
+        return 0.0
+
     # ------------------------------------------------------------------ execution
 
     def _build_options(self, run: AgentRun, project: Project, task: Task | None, resume: str | None) -> ClaudeAgentOptions:
@@ -449,7 +479,13 @@ class RunManager:
             async with client:
                 await client.query(prompt_input(run.prompt, run.images))
                 async for message in client.receive_response():
+                    run_cost = None
+                    if isinstance(message, ResultMessage) and message.total_cost_usd is not None:
+                        # total_cost_usd is the resumed session's running total, not this run's.
+                        run_cost = max(0.0, message.total_cost_usd - self._session_cost_before(run, message.session_id))
                     for kind, payload in serialize_message(message):
+                        if kind == "result":
+                            payload["cost_usd"] = run_cost
                         self._emit(run_id, kind, payload)
                         if kind == "system" and payload.get("session_id"):
                             self._update_run(run_id, session_id=payload["session_id"])
@@ -457,7 +493,8 @@ class RunManager:
                         final = {
                             "status": RunStatus.failed if message.is_error else RunStatus.succeeded,
                             "result": message.result,
-                            "cost_usd": message.total_cost_usd,
+                            "cost_usd": run_cost,
+                            "session_cost_usd": message.total_cost_usd,
                             "num_turns": message.num_turns,
                             "session_id": message.session_id,
                         }

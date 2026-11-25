@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { openExternal } from "../api";
 import type { Project, Task } from "../types";
-import { AgentsTab } from "./AgentsTab";
+import { AgentsTab, type FocusRequest } from "./AgentsTab";
 import { BoardTab } from "./BoardTab";
 import { GitHubTab } from "./GitHubTab";
 import { DocsTab } from "./DocsTab";
@@ -23,22 +23,32 @@ const TABS: { id: TabId; label: string }[] = [
 interface Props {
   project: Project;
   onChanged: () => void;
+  /** Open a session in the Agents tab, e.g. from the sidebar's Sessions list. A new nonce reopens it. */
+  openSession?: FocusRequest | null;
 }
 
-export function ProjectView({ project, onChanged }: Props) {
-  const [tab, setTab] = useState<TabId>("overview");
+export function ProjectView({ project, onChanged, openSession }: Props) {
+  const [tab, setTab] = useState<TabId>(openSession ? "agents" : "overview");
   const [editing, setEditing] = useState(false);
   // A task handed to the Agents tab from the board ("Run agent").
   const [agentTask, setAgentTask] = useState<Task | null>(null);
-  const [focusRunId, setFocusRunId] = useState<number | null>(null);
+  const [focus, setFocus] = useState<FocusRequest | null>(openSession ?? null);
+
+  useEffect(() => {
+    if (!openSession) return;
+    setFocus(openSession);
+    setTab("agents");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openSession?.nonce]);
 
   function runAgentOn(task: Task) {
     setAgentTask(task);
     setTab("agents");
   }
 
-  function openRun(runId: number) {
-    setFocusRunId(runId);
+  /** "run" goes to that message; "open" opens its session where the session_open_scroll setting says. */
+  function openRun(runId: number, scroll: FocusRequest["scroll"] = "run") {
+    setFocus({ runId, nonce: Date.now(), scroll });
     setTab("agents");
   }
 
@@ -72,7 +82,7 @@ export function ProjectView({ project, onChanged }: Props) {
       </header>
 
       <section className="content">
-        {tab === "overview" && <OverviewTab project={project} onOpenRun={openRun} />}
+        {tab === "overview" && <OverviewTab project={project} onOpenRun={(id) => openRun(id, "open")} />}
         {tab === "board" && <BoardTab project={project} onRunAgent={runAgentOn} onOpenRun={openRun} onChanged={onChanged} />}
         {tab === "docs" && <DocsTab project={project} onOpenRun={openRun} />}
         {tab === "agents" && (
@@ -80,7 +90,7 @@ export function ProjectView({ project, onChanged }: Props) {
             project={project}
             initialTask={agentTask}
             onConsumeInitialTask={() => setAgentTask(null)}
-            focusRunId={focusRunId}
+            focus={focus}
             onChanged={onChanged}
           />
         )}

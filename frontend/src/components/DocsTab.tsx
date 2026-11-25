@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { timeAgo, useLoader, usePolling } from "../hooks";
 import type { Doc, DocCollection, DocKind, DocListItem, DocSearchHit, DocSearchStatus, DocStatus, Project } from "../types";
+import { docRef } from "../refs";
 import { Markdown } from "./Markdown";
 import { MemoryImportModal } from "./MemoryImportModal";
 import { Organizer } from "./Organizer";
@@ -254,6 +255,11 @@ export function DocsTab({ project, onOpenRun }: { project: Project; onOpenRun: (
         <DocPane
           key={`doc-${sel.id}-${paneVersion}`}
           docId={sel.id}
+          projectKey={project.key}
+          refOf={(id) => {
+            const d = docs.data?.find((x) => x.id === id);
+            return d ? docRef(project.key, d) : undefined;
+          }}
           collections={collections}
           onSaved={onDocSaved}
           onOpen={(id) => setSel({ kind: "doc", id })}
@@ -362,8 +368,8 @@ function SearchStatus({ projectId }: { projectId: number }) {
 }
 
 function listItem(d: Doc): DocListItem {
-  const { id, title, pinned, status, kind, origin, collection_id, updated_at } = d;
-  return { id, title, pinned, status, kind, origin, collection_id, updated_at };
+  const { id, number, title, pinned, status, kind, origin, collection_id, updated_at } = d;
+  return { id, number, title, pinned, status, kind, origin, collection_id, updated_at };
 }
 
 /** Collections as select options: each top-level collection followed by its subcollections. */
@@ -538,12 +544,16 @@ function CollectionPane({
 
 function DocPane({
   docId,
+  projectKey,
+  refOf,
   collections,
   onSaved,
   onOpen,
   onDeleted,
 }: {
   docId: number;
+  projectKey: string;
+  refOf: (docId: number) => string | undefined;
   collections: DocCollection[];
   onSaved: (d: Doc) => void;
   onOpen: (id: number) => void;
@@ -555,6 +565,8 @@ function DocPane({
   return (
     <DocEditor
       doc={doc.data}
+      projectKey={projectKey}
+      refOf={refOf}
       collections={collections}
       onSaved={(d) => {
         doc.setData(d);
@@ -568,12 +580,17 @@ function DocPane({
 
 function DocEditor({
   doc,
+  projectKey,
+  refOf,
   collections,
   onSaved,
   onOpen,
   onDeleted,
 }: {
   doc: Doc;
+  projectKey: string;
+  /** "MER-D3" for another doc of the project, found by its id. */
+  refOf: (docId: number) => string | undefined;
   collections: DocCollection[];
   onSaved: (d: Doc) => void;
   onOpen: (id: number) => void;
@@ -629,6 +646,9 @@ function DocEditor({
         </button>
       </div>
       <div className="row doc-meta">
+        <span className="faint doc-ref" title="This doc's id: agents and tasks refer to it by it">
+          {docRef(projectKey, doc)}
+        </span>
         <select
           className="small"
           value={doc.collection_id ?? ""}
@@ -662,7 +682,7 @@ function DocEditor({
           <span className="faint">
             Replaced by{" "}
             <a href="#" onClick={(e) => (e.preventDefault(), onOpen(doc.superseded_by!))}>
-              doc {doc.superseded_by}
+              {refOf(doc.superseded_by) ?? "another doc"}
             </a>
           </span>
         )}

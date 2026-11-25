@@ -42,10 +42,10 @@ from ..models import (
     utcnow,
 )
 from . import appearance as appearance_store
-from . import doc_collections, doc_store, preferences, themes
+from . import attachments, doc_collections, doc_store, preferences, refs, themes
 
 SERVER_NAME = "mercury"
-TASK_TOOL_NAMES = ("list_tasks", "create_task", "update_task")
+TASK_TOOL_NAMES = ("list_tasks", "create_task", "update_task", "view_task_images")
 ORGANIZER_TASK_TOOL_NAMES = ("merge_tasks", "reorder_tasks")  # only in board organizer runs
 DOC_TOOL_NAMES = (
     "browse_docs",
@@ -94,6 +94,9 @@ _STATUS_RANK = {s: i for i, s in enumerate(TaskStatus)}  # backlog < todo < ... 
 _PRIORITY_RANK = {p: i for i, p in enumerate(TaskPriority)}
 _DOC_STATUSES = [s.value for s in DocStatus]
 _DOC_KINDS = [k.value for k in DocKind]
+# Tasks and docs are named by their per-project ids (services/refs.py); agents may pass the bare number too.
+_TASK_ID = {"type": ["string", "integer"], "description": "The task's id, e.g. \"MER-12\" (or 12)."}
+_DOC_ID = {"type": ["string", "integer"], "description": "The doc's id, e.g. \"MER-D3\" (or 3)."}
 
 
 def next_position(session: Session, project_id: int, status: TaskStatus) -> float:
@@ -104,16 +107,17 @@ def next_position(session: Session, project_id: int, status: TaskStatus) -> floa
     return (last or 0) + 1
 
 
-def _task_dict(task: Task, full: bool = True) -> dict[str, Any]:
+def _task_dict(task: Task, key: str | None, full: bool = True) -> dict[str, Any]:
     description = task.description
     if not full and len(description) > MAX_LISTED_DESCRIPTION:
         description = description[:MAX_LISTED_DESCRIPTION] + "…"
     return {
-        "id": task.id,
+        "id": refs.task_ref(key, task.number),
         "title": task.title,
         "status": task.status.value,
         "priority": task.priority.value,
         "description": description,
+        **({"pictures": len(task.images)} if task.images else {}),
     }
 
 
@@ -150,8 +154,9 @@ def build_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
         elif not args.get("include_done"):
             query = query.where(Task.status != TaskStatus.done)
         with Session(get_engine()) as s:
+            key = refs.project_key(s, project_id)
             tasks = s.exec(query.order_by(Task.status, Task.position, Task.id)).all()
-            return _ok([_task_dict(t, full=bool(args.get("full"))) for t in tasks])
+            return _ok([_task_dict(t, key, full=bool(args.get("full"))) for t in tasks])
 
     @tool(
         "create_task",
@@ -185,7 +190,7 @@ def build_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             s.add(task)
             s.commit()
             s.refresh(task)
-            return _ok(_task_dict(task))
+            return _ok(_task_dict(task, refs.project_key(s, project_id)))
 
     @tool(
         "update_task",
@@ -194,7 +199,7 @@ def build_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
         {
             "type": "object",
             "properties": {
-                "task_id": {"type": "integer"},
+                "task_id": _TASK_ID,
                 "title": {"type": "string"},
                 "description": {"type": "string", "description": "Replaces the whole description."},
                 "append_note": {
@@ -209,8 +214,8 @@ def build_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
     )
     async def update_task(args: dict[str, Any]) -> dict[str, Any]:
         with Session(get_engine()) as s:
-            task = s.get(Task, args.get("task_id"))
-            if task is None or task.project_id != project_id:
+            task = refs.get_task(s, project_id, args.get("task_id"))
+            if task is None:
                 return _error(f"Task {args.get('task_id')} isn't in this project. Use list_tasks to find task ids.")
             if "title" in args:
                 title = (args["title"] or "").strip()
@@ -230,9 +235,32 @@ def build_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             s.add(task)
             s.commit()
             s.refresh(task)
-            return _ok(_task_dict(task))
+            return _ok(_task_dict(task, refs.project_key(s, project_id)))
 
-    return [list_tasks, create_task, update_task]
+    @tool(
+        "view_task_images",
+        "Look at the pictures (screenshots and the like) the user attached to a task. list_tasks shows "
+        "how many a task has as \"pictures\".",
+        {"type": "object", "properties": {"task_id": _TASK_ID}, "required": ["task_id"]},
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def view_task_images(args: dict[str, Any]) -> dict[str, Any]:
+        with Session(get_engine()) as s:
+            task = refs.get_task(s, project_id, args.get("task_id"))
+            if task is None:
+                return _error(f"Task {args.get('task_id')} isn't in this project. Use list_tasks to find task ids.")
+            ref = refs.task_ref(refs.project_key(s, project_id), task.number)
+            names = list(task.images or [])
+        if not names:
+            return _ok({"task": ref, "pictures": 0, "note": "This task has no pictures attached."})
+        blocks = attachments.image_blocks_for_tool(names)
+        missing = len(names) - len(blocks)
+        note = f"{ref} has {len(blocks)} picture{'s' if len(blocks) != 1 else ''}, in the order the user attached them."
+        if missing:
+            note += f" {missing} more couldn't be found in Mercury's attachments folder."
+        return {"content": [{"type": "text", "text": note}, *blocks]}
+
+    return [list_tasks, create_task, update_task, view_task_images]
 
 
 def build_organizer_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
@@ -243,16 +271,16 @@ def build_organizer_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
         "Fold duplicate or overlapping tasks into one. The tasks in merge_ids are deleted; keep_id stays. "
         "Without a description, each merged task's description is appended to the kept one, so nothing is lost; "
         "if you pass a description it replaces the kept one and must carry every detail from all of them. "
-        "Mercury notes which tasks were merged, moves their agent sessions to the kept task, and keeps the "
+        "Mercury notes which tasks were merged, moves their agent sessions and pictures to the kept task, and keeps the "
         "highest priority and the furthest-along status. Done tasks, tasks with a running agent, and tasks "
         "linked to GitHub issues can't be merged away (a GitHub-linked task can be the one you keep).",
         {
             "type": "object",
             "properties": {
-                "keep_id": {"type": "integer", "description": "The task that remains."},
+                "keep_id": {**_TASK_ID, "description": "The task that remains, e.g. \"MER-12\"."},
                 "merge_ids": {
                     "type": "array",
-                    "items": {"type": "integer"},
+                    "items": {"type": ["string", "integer"]},
                     "minItems": 1,
                     "maxItems": MAX_MERGED_TASKS,
                     "description": "Tasks folded into keep_id and then deleted.",
@@ -265,23 +293,28 @@ def build_organizer_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
         },
     )
     async def merge_tasks(args: dict[str, Any]) -> dict[str, Any]:
-        keep_id = args.get("keep_id")
-        merge_ids = list(dict.fromkeys(i for i in args.get("merge_ids") or [] if isinstance(i, int)))
-        if not isinstance(keep_id, int) or not merge_ids:
+        raw_keep, raw_merge = args.get("keep_id"), list(args.get("merge_ids") or [])
+        if raw_keep is None or not raw_merge:
             return _error("Pass keep_id and the merge_ids to fold into it.")
-        if keep_id in merge_ids:
-            return _error("keep_id can't also be in merge_ids.")
-        if len(merge_ids) > MAX_MERGED_TASKS:
+        if len(raw_merge) > MAX_MERGED_TASKS:
             return _error(f"Merge at most {MAX_MERGED_TASKS} tasks at a time.")
         with Session(get_engine()) as s:
-            tasks = {t.id: t for t in s.exec(select(Task).where(Task.id.in_([keep_id, *merge_ids]))).all()}
-            missing = [i for i in [keep_id, *merge_ids] if i not in tasks or tasks[i].project_id != project_id]
+            key = refs.project_key(s, project_id)
+
+            def ref(t: Task) -> str:
+                return refs.task_ref(key, t.number)
+
+            keep = refs.get_task(s, project_id, raw_keep)
+            found = [refs.get_task(s, project_id, r) for r in raw_merge]
+            missing = [r for r, t in zip([raw_keep, *raw_merge], [keep, *found]) if t is None]
             if missing:
                 return _error(f"Not tasks in this project: {missing}. Use list_tasks to find task ids.")
-            keep = tasks[keep_id]
-            merged = [tasks[i] for i in merge_ids]
+            merged = list({t.id: t for t in found}.values())
+            if keep.id in {t.id for t in merged}:
+                return _error("keep_id can't also be in merge_ids.")
+            merge_ids = [t.id for t in merged]
             if keep.status == TaskStatus.done:
-                return _error(f"T-{keep.id} is done; keep an open task instead.")
+                return _error(f"{ref(keep)} is done; keep an open task instead.")
             active = set(
                 s.exec(
                     select(AgentRun.task_id).where(
@@ -292,11 +325,11 @@ def build_organizer_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             problems = []
             for t in merged:
                 if t.status == TaskStatus.done:
-                    problems.append(f"T-{t.id} is done")
+                    problems.append(f"{ref(t)} is done")
                 elif t.id in active:
-                    problems.append(f"T-{t.id} has an agent running on it")
+                    problems.append(f"{ref(t)} has an agent running on it")
                 elif t.github_issue_number is not None:
-                    problems.append(f"T-{t.id} is linked to GitHub issue #{t.github_issue_number} (keep it instead)")
+                    problems.append(f"{ref(t)} is linked to GitHub issue #{t.github_issue_number} (keep it instead)")
             if problems:
                 return _error("Nothing was merged: " + "; ".join(problems) + ".")
 
@@ -311,9 +344,9 @@ def build_organizer_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
                 parts = [keep.description.strip()]
                 for t in merged:
                     if t.description.strip():
-                        parts.append(f"### From T-{t.id}: {t.title}\n\n{t.description.strip()}")
+                        parts.append(f"### From {ref(t)}: {t.title}\n\n{t.description.strip()}")
                 body = "\n\n".join(p for p in parts if p)
-            note = "_Merged in: " + ", ".join(f"T-{t.id} ({t.title})" for t in merged) + "._"
+            note = "_Merged in: " + ", ".join(f"{ref(t)} ({t.title})" for t in merged) + "._"
             keep.description = f"{body}\n\n{note}".strip()
             if args.get("priority"):
                 keep.priority = TaskPriority(args["priority"])
@@ -323,16 +356,18 @@ def build_organizer_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             if furthest != keep.status:
                 keep.status = furthest
                 keep.position = next_position(s, project_id, furthest)
+            keep.images = list(keep.images or []) + [n for t in merged for n in (t.images or [])]
             keep.updated_at = utcnow()
             s.add(keep)
             for run in s.exec(select(AgentRun).where(AgentRun.task_id.in_(merge_ids))).all():
                 run.task_id = keep.id
                 s.add(run)
+            deleted = [ref(t) for t in merged]
             for t in merged:
                 s.delete(t)
             s.commit()
             s.refresh(keep)
-            return _ok({"kept": _task_dict(keep), "deleted": merge_ids})
+            return _ok({"kept": _task_dict(keep, key), "deleted": deleted})
 
     @tool(
         "reorder_tasks",
@@ -342,32 +377,35 @@ def build_organizer_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             "type": "object",
             "properties": {
                 "status": {"type": "string", "enum": _STATUSES, "description": "The column."},
-                "task_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1},
+                "task_ids": {"type": "array", "items": {"type": ["string", "integer"]}, "minItems": 1},
             },
             "required": ["status", "task_ids"],
         },
     )
     async def reorder_tasks(args: dict[str, Any]) -> dict[str, Any]:
         status = TaskStatus(args["status"])
-        order = list(dict.fromkeys(i for i in args.get("task_ids") or [] if isinstance(i, int)))
-        if not order:
+        raw = list(args.get("task_ids") or [])
+        if not raw:
             return _error("Pass the task_ids in the order you want.")
         with Session(get_engine()) as s:
+            key = refs.project_key(s, project_id)
             column = s.exec(
                 select(Task).where(Task.project_id == project_id, Task.status == status).order_by(Task.position, Task.id)
             ).all()
-            by_id = {t.id: t for t in column}
-            stray = [i for i in order if i not in by_id]
+            by_number = {t.number: t for t in column}
+            numbers = [refs.parse_task_number(r, key) for r in raw]
+            stray = [r for r, n in zip(raw, numbers) if n not in by_number]
             if stray:
                 return _error(f"Not in the {status.value} column: {stray}. Nothing was reordered.")
+            order = list(dict.fromkeys(numbers))
             listed = set(order)
-            ordered = [by_id[i] for i in order] + [t for t in column if t.id not in listed]
+            ordered = [by_number[n] for n in order] + [t for t in column if t.number not in listed]
             for pos, t in enumerate(ordered, start=1):
                 if t.position != pos:
                     t.position = pos
                     s.add(t)
             s.commit()
-            return _ok({"status": status.value, "order": [t.id for t in ordered]})
+            return _ok({"status": status.value, "order": [refs.task_ref(key, t.number) for t in ordered]})
 
     return [merge_tasks, reorder_tasks]
 
@@ -376,9 +414,9 @@ def _missing_doc(doc_id: Any) -> dict[str, Any]:
     return _error(f"Doc {doc_id} isn't in this project. Use search_docs or list_docs to find doc ids.")
 
 
-def _doc_header(doc: Doc, paths: dict[int, str] | None = None) -> dict[str, Any]:
+def _doc_header(s: Session, doc: Doc, paths: dict[int, str] | None = None) -> dict[str, Any]:
     data: dict[str, Any] = {
-        "id": doc.id,
+        "id": refs.doc_ref(refs.project_key(s, doc.project_id), doc.number),
         "title": doc.title,
         "collection_id": doc.collection_id,
         "status": doc.status.value,
@@ -390,7 +428,7 @@ def _doc_header(doc: Doc, paths: dict[int, str] | None = None) -> dict[str, Any]
         "summary_stale": doc_store.summary_stale(doc),
     }
     if doc.superseded_by:
-        data["superseded_by"] = doc.superseded_by
+        data["superseded_by"] = refs.doc_refs(s, [doc.superseded_by]).get(doc.superseded_by)
     if paths and doc.collection_id in paths:
         data["collection"] = paths[doc.collection_id]
     return data
@@ -410,8 +448,10 @@ def _short(text: str, limit: int) -> str:
 
 def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
     def get_doc(s: Session, doc_id: Any) -> Doc | None:
-        doc = s.get(Doc, doc_id) if isinstance(doc_id, int) else None
-        return doc if doc is not None and doc.project_id == project_id else None
+        return refs.get_doc(s, project_id, doc_id)
+
+    def doc_ref(s: Session, doc: Doc) -> str:
+        return refs.doc_ref(refs.project_key(s, project_id), doc.number)
 
     def collection_problem(s: Session, collection_id: Any) -> str | None:
         if collection_id is None or doc_collections.get(s, project_id, collection_id) is not None:
@@ -494,7 +534,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             data["total_docs"] = total
             data["offset"] = offset
             data["docs"] = [
-                {"id": d.id, "title": d.title, "status": d.status.value,
+                {"id": doc_ref(s, d), "title": d.title, "status": d.status.value,
                  "summary": _short(d.summary, LISTED_SUMMARY_CHARS) or None}
                 for d in docs
             ]
@@ -574,18 +614,23 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
         {
             "type": "object",
             "properties": {
-                "doc_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 500},
+                "doc_ids": {"type": "array", "items": {"type": ["string", "integer"]}, "minItems": 1, "maxItems": 500},
                 "collection_id": {"type": ["integer", "null"]},
             },
             "required": ["doc_ids", "collection_id"],
         },
     )
     async def move_docs(args: dict[str, Any]) -> dict[str, Any]:
-        doc_ids = [i for i in args.get("doc_ids") or [] if isinstance(i, int)]
-        if not doc_ids:
+        raw = list(args.get("doc_ids") or [])
+        if not raw:
             return _error("Pass the doc_ids to move.")
         target = args.get("collection_id")
         with Session(get_engine()) as s:
+            docs = [get_doc(s, r) for r in raw]
+            missing = [r for r, d in zip(raw, docs) if d is None]
+            if missing:
+                return _error(f"Not docs in this project: {missing}. Nothing was moved.")
+            doc_ids = list(dict.fromkeys(d.id for d in docs))
             try:
                 moved = doc_collections.move_docs(s, project_id, doc_ids, target)
             except doc_collections.CollectionError as e:
@@ -593,13 +638,14 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             name = doc_collections.paths(s, project_id).get(target) if target is not None else "(unfiled)"
             return _ok({"moved": moved, "to": name})
 
-    def check_target(s: Session, doc_id: int | None, target: Any) -> str | None:
+    def resolve_target(s: Session, doc_id: int | None, target: Any) -> tuple[int | None, str | None]:
+        """superseded_by as the other doc's primary key, or a problem."""
         if target is None:
-            return None
+            return None, None
         other = get_doc(s, target)
         if other is None or other.id == doc_id:
-            return "superseded_by must be the id of another doc in this project."
-        return None
+            return None, "superseded_by must be the id of another doc in this project."
+        return other.id, None
 
     @tool(
         "search_docs",
@@ -639,7 +685,8 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
                     include_archived=bool(args.get("include_archived")),
                     collection_ids=scope,
                 )
-                return [h.as_dict() for h in hits]
+                key = refs.project_key(s, project_id)
+                return [{**h.as_dict(), "doc_id": refs.doc_ref(key, h.doc.number)} for h in hits]
 
         results = await asyncio.to_thread(run)
         if not results:
@@ -674,7 +721,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             total = s.exec(select(func.count()).select_from(query.subquery())).one()
             docs = s.exec(query.order_by(Doc.pinned.desc(), Doc.updated_at.desc()).offset(offset).limit(limit)).all()
             rows = [
-                {"id": d.id, "title": d.title, "status": d.status.value, "collection_id": d.collection_id,
+                {"id": doc_ref(s, d), "title": d.title, "status": d.status.value, "collection_id": d.collection_id,
                  "updated_at": d.updated_at.date().isoformat(), "summary": _short(d.summary, LISTED_SUMMARY_CHARS) or None}
                 for d in docs
             ]
@@ -688,7 +735,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
         {
             "type": "object",
             "properties": {
-                "doc_id": {"type": "integer"},
+                "doc_id": _DOC_ID,
                 "start_line": {"type": "integer", "description": "1-based, inclusive."},
                 "end_line": {"type": "integer", "description": "1-based, inclusive. Default: end of doc."},
                 "outline": {"type": "boolean"},
@@ -702,7 +749,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             doc = get_doc(s, args.get("doc_id"))
             if doc is None:
                 return _missing_doc(args.get("doc_id"))
-            data = _doc_header(doc)
+            data = _doc_header(s, doc)
             total_lines = doc.body.count("\n") + 1
             data["total_lines"] = total_lines
             data["chars"] = len(doc.body)
@@ -767,7 +814,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
                     return _error(
                         "Docs with similar titles already exist. Update one of them with update_doc, or call "
                         "create_doc again with confirm_new=true if this really is a separate topic:\n"
-                        + json.dumps([{"id": d.id, "title": d.title, "summary": _short(d.summary, LISTED_SUMMARY_CHARS)} for d in similar], indent=2)
+                        + json.dumps([{"id": doc_ref(s, d), "title": d.title, "summary": _short(d.summary, LISTED_SUMMARY_CHARS)} for d in similar], indent=2)
                     )
             doc = Doc(
                 project_id=project_id,
@@ -780,7 +827,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
                 origin=DocOrigin.agent,
             )
             doc_store.save_doc(s, doc, summary=summary or None)
-            data = _doc_header(doc, doc_collections.paths(s, project_id))
+            data = _doc_header(s, doc, doc_collections.paths(s, project_id))
             if doc.collection_id is None and doc.kind == DocKind.doc:
                 hint = filing_hint(s, doc)
                 if hint:
@@ -796,7 +843,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
         {
             "type": "object",
             "properties": {
-                "doc_id": {"type": "integer"},
+                "doc_id": _DOC_ID,
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "Replaces the whole body (Markdown)."},
                 "old_text": {"type": "string", "description": "Exact text to replace; must occur once."},
@@ -804,7 +851,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
                 "append": {"type": "string", "description": "Appended to the end of the body."},
                 "summary": {"type": "string", "description": "Replaces the agent summary."},
                 "status": {"type": "string", "enum": _DOC_STATUSES},
-                "superseded_by": {"type": "integer", "description": "The doc that replaces this one."},
+                "superseded_by": {**_DOC_ID, "description": "The doc that replaces this one, e.g. \"MER-D3\"."},
                 "kind": {"type": "string", "enum": _DOC_KINDS},
                 "pinned": {"type": "boolean"},
                 "collection_id": {"type": ["integer", "null"], "description": "Move it to this collection (null: unfiled)."},
@@ -822,10 +869,10 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             if doc is None:
                 return _missing_doc(args.get("doc_id"))
             if "superseded_by" in args:
-                problem = check_target(s, doc.id, args["superseded_by"])
+                target, problem = resolve_target(s, doc.id, args["superseded_by"])
                 if problem:
                     return _error(problem)
-                doc.superseded_by = args["superseded_by"]
+                doc.superseded_by = target
                 if args["superseded_by"] is not None and not args.get("status"):
                     doc.status = DocStatus.superseded
             if "title" in args:
@@ -857,7 +904,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
                 doc.collection_id = args["collection_id"]
             summary = args.get("summary")
             doc_store.save_doc(s, doc, summary=summary.strip() if isinstance(summary, str) and summary.strip() else None)
-            data = _doc_header(doc, doc_collections.paths(s, project_id))
+            data = _doc_header(s, doc, doc_collections.paths(s, project_id))
             if data["summary_stale"]:
                 data["note"] = "The summary no longer matches the doc; pass summary to update it (otherwise Mercury rewrites it shortly)."
             return _ok(data)
@@ -866,7 +913,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
         "delete_doc",
         "Delete one of this project's Mercury docs. Unless the run is in full-auto mode, the user is "
         "asked to approve it. Only delete a doc when the user asked you to; to retire one, set its status.",
-        {"type": "object", "properties": {"doc_id": {"type": "integer"}}, "required": ["doc_id"]},
+        {"type": "object", "properties": {"doc_id": _DOC_ID}, "required": ["doc_id"]},
         annotations=ToolAnnotations(destructiveHint=True),
     )
     async def delete_doc(args: dict[str, Any]) -> dict[str, Any]:
@@ -874,7 +921,7 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             doc = get_doc(s, args.get("doc_id"))
             if doc is None:
                 return _missing_doc(args.get("doc_id"))
-            result = {"deleted": doc.id, "title": doc.title}
+            result = {"deleted": doc_ref(s, doc), "title": doc.title}
             doc_store.delete_doc(s, doc)
             return _ok(result)
 

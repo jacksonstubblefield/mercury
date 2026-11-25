@@ -13,6 +13,7 @@ from .db import init_db
 from .routers import agents, appearance, docs, github, preferences, projects, source_control, tasks, usage
 from .security import LocalOnlyMiddleware
 from .services import doc_summaries, embeddings
+from .services import preferences as preferences_store
 from .services.agent_runner import RunManager
 
 
@@ -48,7 +49,7 @@ def create_app(run_manager: RunManager | None = None) -> FastAPI:
         return {
             "ok": True,
             "version": __version__,
-            "default_model": config.DEFAULT_AGENT_MODEL,
+            "default_model": preferences_store.load().default_model.value,
             "gh_installed": shutil.which("gh") is not None,
             "git_installed": shutil.which("git") is not None,
         }

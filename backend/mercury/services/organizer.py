@@ -82,7 +82,7 @@ duplicate into one of them.
 {repo}
 - If the board is already tidy, change nothing and say so.
 
-Finish with a short summary in Markdown: what you merged (e.g. "T-4 + T-9 → T-4"), split, retitled and reordered, \
+Finish with a short summary in Markdown: what you merged (e.g. "{k}-4 + {k}-9 → {k}-4"), split, retitled and reordered, \
 then anything the user should decide (tasks that look done, obsolete or unclear). No preamble."""
 
 _DOCS = """\
@@ -115,7 +115,7 @@ change what they say, except to combine two rules docs that say the same thing.
 - If the docs are already tidy, change nothing and say so.
 
 Finish with a short summary in Markdown: collections created, renamed or removed, how many docs you filed, what you \
-combined (e.g. "Docs 12 + 15 → 12"), what you retitled or archived, then anything the user should decide. \
+combined (e.g. "{k}-D12 + {k}-D15 → {k}-D12"), what you retitled or archived, then anything the user should decide. \
 No preamble."""
 
 
@@ -127,7 +127,7 @@ def system_prompt(project: Project, purpose: RunPurpose) -> str:
     )
     template = _BOARD if purpose == RunPurpose.organize_board else _DOCS
     lines = [
-        template.format(t=f"mcp__{SERVER_NAME}__", repo=repo),
+        template.format(t=f"mcp__{SERVER_NAME}__", repo=repo, k=project.key or "KEY"),
         "",
         f"Project: {project.name}",
     ]

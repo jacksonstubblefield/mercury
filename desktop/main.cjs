@@ -3,7 +3,7 @@
 //   electron .          -> backend serves the built frontend (frontend/dist) on a free port
 //   electron . --dev    -> backend on :8765, UI from the Vite dev server on :5173 (hot reload)
 
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, Notification, dialog, ipcMain, shell } = require("electron");
 const { spawn, execFile } = require("node:child_process");
 const fs = require("node:fs");
 const net = require("node:net");
@@ -130,6 +130,57 @@ ipcMain.handle("mercury:pick-folder", async () => {
 
 ipcMain.handle("mercury:open-external", async (_event, url) => {
   if (typeof url === "string" && /^https?:\/\//.test(url)) await shell.openExternal(url);
+});
+
+// Shown notifications, kept so their click handlers survive garbage collection, including once they've
+// moved to the Action Center (where "close" has already fired). Capped, oldest dropped first.
+const notifications = new Set();
+const MAX_NOTIFICATIONS = 20;
+let flashing = false;
+
+function showWindow() {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// An agent session finished or needs the user (frontend/src/notifications.ts decides when).
+ipcMain.on("mercury:notify", (event, n) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || !Notification.isSupported()) return;
+  const projectId = Number(n?.projectId);
+  const runId = Number(n?.runId);
+  if (!Number.isInteger(projectId) || !Number.isInteger(runId)) return;
+  const text = (value, max) => String(value ?? "").slice(0, max);
+
+  const notification = new Notification({
+    title: text(n.title, 120) || "Mercury",
+    body: text(n.body, 300),
+    icon: path.join(ROOT, "assets", "icon", "icon.png"),
+  });
+  notifications.add(notification);
+  if (notifications.size > MAX_NOTIFICATIONS) notifications.delete(notifications.values().next().value);
+  const forget = () => notifications.delete(notification);
+  notification.on("click", () => {
+    forget();
+    showWindow();
+    mainWindow?.webContents.send("mercury:open-run", { projectId, runId });
+  });
+  notification.on("failed", (_e, error) => {
+    forget();
+    console.error(`Notification failed: ${error}`);
+  });
+  notification.show();
+
+  // Flash the taskbar button until the window gets focus.
+  if (!mainWindow.isFocused() && !flashing) {
+    flashing = true;
+    mainWindow.flashFrame(true);
+    mainWindow.once("focus", () => {
+      flashing = false;
+      mainWindow?.flashFrame(false);
+    });
+  }
 });
 
 if (!app.requestSingleInstanceLock()) {

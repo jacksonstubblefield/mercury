@@ -7,6 +7,8 @@ export type PermissionMode = "plan" | "default" | "acceptEdits" | "bypassPermiss
 export interface Project {
   id: number;
   name: string;
+  /** Unique, 2-4 characters: the prefix of the project's task and doc ids (MER-12, MER-D3). */
+  key: string;
   description: string;
   repo_path: string | null;
   github_repo: string | null;
@@ -14,6 +16,8 @@ export interface Project {
   color: string;
   /** Preselected for new agent sessions. null: the app-wide default (Preferences). */
   default_permission_mode: PermissionMode | null;
+  /** Preselected model for new agent sessions. null: the app-wide default (Preferences). */
+  default_model: AgentModel | null;
   created_at: string;
   updated_at: string;
   open_tasks: number;
@@ -25,6 +29,8 @@ export type ProjectInput = Partial<Omit<Project, "id" | "created_at" | "updated_
 export interface Task {
   id: number;
   project_id: number;
+  /** Per-project id: shown as `${project.key}-${number}` (see refs.ts). */
+  number: number;
   title: string;
   description: string;
   status: TaskStatus;
@@ -32,9 +38,14 @@ export interface Task {
   position: number;
   github_issue_number: number | null;
   github_url: string | null;
+  /** Attached pictures (attachment names; load them from api.attachmentUrl(name)). A run started on the task gets copies. */
+  images: string[];
   created_at: string;
   updated_at: string;
 }
+
+/** A task change. `images` lists the pictures to keep, in order; `add_images` appends new ones (base64). */
+export type TaskChanges = Partial<Omit<Task, "images">> & { images?: string[]; add_images?: string[] };
 
 export type DocStatus = "current" | "draft" | "superseded" | "archived";
 export type DocKind = "doc" | "rules";
@@ -43,6 +54,8 @@ export type DocOrigin = "user" | "agent" | "import";
 export interface Doc {
   id: number;
   project_id: number;
+  /** Per-project id: shown as `${project.key}-D${number}` (see refs.ts). */
+  number: number;
   title: string;
   body: string;
   pinned: boolean;
@@ -64,6 +77,7 @@ export interface Doc {
 /** A doc in the list (no body; the editor loads one doc at a time). */
 export interface DocListItem {
   id: number;
+  number: number;
   title: string;
   pinned: boolean;
   status: DocStatus;
@@ -152,6 +166,7 @@ export interface AgentRun {
   parent_run_id: number | null;
   purpose: RunPurpose;
   prompt: string;
+  /** The Claude model id; null on runs from before models could be chosen. */
   model: string | null;
   permission_mode: PermissionMode;
   max_budget_usd: number | null;
@@ -161,10 +176,30 @@ export interface AgentRun {
   images: string[];
   result: string | null;
   error: string | null;
-  cost_usd: number | null;
+  cost_usd: number | null; // this run's own cost
+  session_cost_usd: number | null; // the Claude session's running total when this run ended
   num_turns: number | null;
   created_at: string;
   started_at: string | null;
+  finished_at: string | null;
+  /** The user has looked at it since it finished; unseen finished sessions stay in the sidebar. */
+  seen: boolean;
+}
+
+/** A session in the sidebar's Sessions list. Mirrors `SessionAttention` in models.py. */
+export interface SessionAttention {
+  project_id: number;
+  /** The session's first run; its prompt names the session. */
+  root_run_id: number;
+  /** The session's newest run, whose status this is. */
+  run_id: number;
+  status: RunStatus;
+  title: string;
+  image_count: number;
+  /** The tool waiting for approval, when status is waiting_approval. */
+  pending_tool: string | null;
+  result: string | null;
+  error: string | null;
   finished_at: string | null;
 }
 
@@ -341,13 +376,25 @@ export interface Appearance {
   radius: number | null;
 }
 
+/** Claude models offered for agent sessions. Mirrors `AgentModel` in models.py. */
+export type AgentModel = "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5" | "claude-fable-5-2";
+
 /** How much of the settings agents may see and change. Mirrors `AgentSettingsAccess` in models.py. */
 export type AgentSettingsAccess = "off" | "read" | "change";
+
+/** Where an agent conversation opens when selected. Mirrors `SessionOpenScroll` in models.py. */
+export type SessionOpenScroll = "top" | "last_message" | "bottom";
 
 /** App-wide settings (the Settings page). Mirrors `Preferences` in models.py. */
 export interface Preferences {
   /** Preselected when starting a new agent session. */
   default_permission_mode: PermissionMode;
+  /** Model preselected for new agent sessions in projects without their own default. */
+  default_model: AgentModel;
   /** Only the user can change this; agents can't widen their own access. */
   agent_settings_access: AgentSettingsAccess;
+  /** Desktop notification when a session finishes or needs an answer while Mercury isn't in focus. */
+  agent_notifications: boolean;
+  /** Where an agent conversation opens when selected (links to a specific message still go there). */
+  session_open_scroll: SessionOpenScroll;
 }

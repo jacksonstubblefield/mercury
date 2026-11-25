@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { MODES, modeInfo } from "../permissions";
-import type { PermissionMode, Project, ProjectStatus } from "../types";
+import { AGENT_MODELS, modelInfo } from "../agentModels";
+import { PROJECT_KEY_RE } from "../refs";
+import type { AgentModel, PermissionMode, Preferences, Project, ProjectStatus } from "../types";
 
 const COLORS = ["#7c8cff", "#4fd18b", "#f0b44c", "#ff6b6b", "#4cc9f0", "#c77dff", "#ff9f68", "#9aa1b2"];
 
@@ -14,13 +16,19 @@ interface Props {
 
 export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
   const [name, setName] = useState(project?.name ?? "");
+  const [key, setKey] = useState(project?.key ?? "");
+  const [suggestedKey, setSuggestedKey] = useState("");
+  const keyValid = key === "" ? !project : PROJECT_KEY_RE.test(key);
   const [description, setDescription] = useState(project?.description ?? "");
   const [repoPath, setRepoPath] = useState(project?.repo_path ?? "");
   const [githubRepo, setGithubRepo] = useState(project?.github_repo ?? "");
   const [status, setStatus] = useState<ProjectStatus>(project?.status ?? "active");
   const [color, setColor] = useState(project?.color ?? COLORS[0]);
   const [mode, setMode] = useState<PermissionMode | null>(project?.default_permission_mode ?? null);
-  const [appMode, setAppMode] = useState<PermissionMode | null>(null);
+  const [model, setModel] = useState<AgentModel | null>(project?.default_model ?? null);
+  const [appPrefs, setAppPrefs] = useState<Preferences | null>(null);
+  const appMode = appPrefs?.default_permission_mode;
+  const appModel = appPrefs?.default_model;
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -28,12 +36,29 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
     let live = true;
     api
       .preferences()
-      .then((p) => live && setAppMode(p.default_permission_mode))
+      .then((p) => live && setAppPrefs(p))
       .catch(() => {});
     return () => {
       live = false;
     };
   }, []);
+
+  // A new project left without a key gets one from its name: show which.
+  useEffect(() => {
+    if (project) return;
+    if (!name.trim()) return setSuggestedKey("");
+    let live = true;
+    const id = window.setTimeout(() => {
+      api
+        .suggestProjectKey(name)
+        .then((r) => live && setSuggestedKey(r.key))
+        .catch(() => {});
+    }, 250);
+    return () => {
+      live = false;
+      window.clearTimeout(id);
+    };
+  }, [name, project]);
 
   async function pickFolder() {
     const folder = await window.mercury?.pickFolder();
@@ -54,6 +79,8 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
       status,
       color,
       default_permission_mode: mode,
+      default_model: model,
+      ...(key && key !== project?.key ? { key } : {}),
     };
     try {
       const saved = project ? await api.updateProject(project.id, body) : await api.createProject(body);
@@ -75,8 +102,35 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
       <div className="modal">
         <h2>{project ? "Project settings" : "New project"}</h2>
 
-        <label>Name</label>
-        <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Mercury" />
+        <div className="row" style={{ alignItems: "flex-start" }}>
+          <div style={{ flex: 1 }}>
+            <label>Name</label>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Mercury" />
+          </div>
+          <div style={{ width: 110 }}>
+            <label title="2-4 letters or digits, starting with a letter. Task and doc ids start with it: MER-12, MER-D3.">
+              Key
+            </label>
+            <input
+              value={key}
+              maxLength={4}
+              onChange={(e) => setKey(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))}
+              placeholder={suggestedKey || "MER"}
+              style={{ fontFamily: "var(--mono, monospace)" }}
+            />
+          </div>
+        </div>
+        {!keyValid && key !== "" && (
+          <p className="error-text" style={{ margin: "4px 0 0" }}>
+            The key is 2-4 letters or digits, starting with a letter.
+          </p>
+        )}
+        {project && key !== project.key && keyValid && (
+          <p className="faint" style={{ fontSize: 12, margin: "4px 0 0" }}>
+            Tasks and docs will show as {key}-12 and {key}-D3. Ids already written down (in docs, commits or
+            messages) as {project.key}-… won't change.
+          </p>
+        )}
 
         <label>Description</label>
         <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What is this project? (Markdown)" />
@@ -93,6 +147,21 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
 
         <label>GitHub repository (owner/name) — detected from the git remote if left blank</label>
         <input value={githubRepo} onChange={(e) => setGithubRepo(e.target.value)} placeholder="octocat/hello-world" />
+
+        <label>Default model for new agent sessions</label>
+        <select value={model ?? ""} onChange={(e) => setModel((e.target.value || null) as AgentModel | null)}>
+          <option value="">App default{appModel ? ` (${modelInfo(appModel)?.label ?? appModel})` : ""}</option>
+          {AGENT_MODELS.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+        {model && (
+          <p className="faint" style={{ fontSize: 12, margin: "4px 0 0" }}>
+            {modelInfo(model)?.hint}
+          </p>
+        )}
 
         <label>Default permissions for new agent sessions</label>
         <select value={mode ?? ""} onChange={(e) => setMode((e.target.value || null) as PermissionMode | null)}>
@@ -145,7 +214,7 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button className="btn primary" disabled={!name.trim() || saving} onClick={save}>
+          <button className="btn primary" disabled={!name.trim() || !keyValid || saving} onClick={save}>
             {project ? "Save" : "Create"}
           </button>
         </div>

@@ -22,9 +22,10 @@ class FakeClient:
 
     instances: list["FakeClient"] = []
 
-    def __init__(self, options, ask_permission: bool = False):
+    def __init__(self, options, ask_permission: bool = False, total_cost_usd: float = 0.0123):
         self.options = options
         self.ask_permission = ask_permission
+        self.total_cost_usd = total_cost_usd
         self.prompt = None
         FakeClient.instances.append(self)
 
@@ -55,7 +56,7 @@ class FakeClient:
             is_error=False,
             num_turns=2,
             session_id="sess-1",
-            total_cost_usd=0.0123,
+            total_cost_usd=self.total_cost_usd,
             result="Done: listed files.",
         )
 
@@ -127,6 +128,25 @@ def test_follow_up_resumes_session(make_client, tmp_path):
     _wait_for(client, second["id"], {"succeeded"})
     assert second["parent_run_id"] == first["id"]
     assert FakeClient.instances[-1].options.resume == "sess-1"
+
+
+def test_follow_up_cost_is_its_own_share(make_client, tmp_path):
+    """The SDK reports a resumed session's running total; each run should store only what it added."""
+    totals = iter([1.0, 1.25, 2.0])
+    client = make_client(lambda opts: FakeClient(opts, total_cost_usd=next(totals)))
+    p, _ = _setup(client, tmp_path)
+    run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "one"}).json()
+    run = _wait_for(client, run["id"], {"succeeded"})
+    costs = [(run["cost_usd"], run["session_cost_usd"])]
+    for prompt in ("two", "three"):
+        run = client.post(f"/api/runs/{run['id']}/follow-up", json={"prompt": prompt}).json()
+        run = _wait_for(client, run["id"], {"succeeded"})
+        costs.append((run["cost_usd"], run["session_cost_usd"]))
+
+    assert costs == [(1.0, 1.0), (0.25, 1.25), (0.75, 2.0)]
+    assert sum(c for c, _ in costs) == 2.0  # what the UI shows for the session
+    result = next(e for e in client.get(f"/api/runs/{run['id']}/events").json() if e["kind"] == "result")
+    assert result["payload"]["cost_usd"] == 0.75 and result["payload"]["total_cost_usd"] == 2.0
 
 
 def test_run_requires_repo_path(client):
@@ -237,6 +257,7 @@ def test_runs_get_mercury_task_tools(make_client, tmp_path):
         "mcp__mercury__list_tasks",
         "mcp__mercury__create_task",
         "mcp__mercury__update_task",
+        "mcp__mercury__view_task_images",
         "mcp__mercury__search_docs",
         "mcp__mercury__list_docs",
         "mcp__mercury__read_doc",
@@ -353,27 +374,34 @@ def test_task_tools_create_list_update(make_client, tmp_path):
     other = client.post("/api/projects", json={"name": "Other"}).json()
     foreign = client.post(f"/api/projects/{other['id']}/tasks", json={"title": "Not yours"}).json()
     tools = build_task_tools(p["id"])
+    t_ref = f"{p['key']}-{t['number']}"
 
     created, err = _call(tools, "create_task", title="  Write docs ", priority="high")
     assert not err and created["title"] == "Write docs" and created["status"] == "todo" and created["priority"] == "high"
+    assert created["id"] == f"{p['key']}-2"  # numbered within the project
 
     listed, _ = _call(tools, "list_tasks")
-    assert {x["id"] for x in listed} == {t["id"], created["id"]}  # never other projects' tasks
+    assert {x["id"] for x in listed} == {t_ref, created["id"]}  # never other projects' tasks
 
-    done, err = _call(tools, "update_task", task_id=t["id"], status="done", append_note="Listed files with ls.")
+    done, err = _call(tools, "update_task", task_id=t_ref, status="done", append_note="Listed files with ls.")
     assert not err and done["status"] == "done"
     stored = client.get(f"/api/tasks/{t['id']}").json()
     assert stored["status"] == "done" and stored["description"] == "use ls\n\nListed files with ls."
 
     assert [x["id"] for x in _call(tools, "list_tasks")[0]] == [created["id"]]  # done hidden by default
-    assert [x["id"] for x in _call(tools, "list_tasks", status="done")[0]] == [t["id"]]
+    assert [x["id"] for x in _call(tools, "list_tasks", status="done")[0]] == [t_ref]
 
-    msg, err = _call(tools, "update_task", task_id=foreign["id"], status="done")
-    assert err and "isn't in this project" in msg
+    # Another project's task isn't reachable, by its own id or by its number.
+    for ref in (f"{other['key']}-{foreign['number']}", f"{p['key']}-{foreign['number'] + 5}"):
+        msg, err = _call(tools, "update_task", task_id=ref, status="done")
+        assert err and "isn't in this project" in msg
     assert client.get(f"/api/tasks/{foreign['id']}").json()["status"] == "todo"
 
     _, err = _call(tools, "update_task", task_id=created["id"], title="  ")
     assert err
+    # The bare number works too.
+    renamed, err = _call(tools, "update_task", task_id=2, title="Write the docs")
+    assert not err and renamed["id"] == created["id"] and renamed["title"] == "Write the docs"
 
 
 def test_agent_completing_its_own_task_is_not_moved_to_review(make_client, tmp_path):
@@ -391,7 +419,7 @@ def test_agent_completing_its_own_task_is_not_moved_to_review(make_client, tmp_p
 
     client = make_client(lambda opts: CompletingClient(opts))
     p, t = _setup(client, tmp_path)
-    CompletingClient.project_id, CompletingClient.task_id = p["id"], t["id"]
+    CompletingClient.project_id, CompletingClient.task_id = p["id"], f"{p['key']}-{t['number']}"
     run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go", "task_id": t["id"]}).json()
     _wait_for(client, run["id"], {"succeeded"})
     assert client.get(f"/api/tasks/{t['id']}").json()["status"] == "done"
@@ -431,3 +459,95 @@ def test_project_default_overrides_app_default(make_client, tmp_path):
     run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go"}).json()
     assert run["permission_mode"] == "bypassPermissions"
     _wait_for(client, run["id"], {"succeeded"})
+
+
+def test_model_resolves_from_request_then_project_then_app(make_client, tmp_path):
+    client = make_client(lambda opts: FakeClient(opts))
+    p, _ = _setup(client, tmp_path)
+
+    run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go"}).json()
+    assert run["model"] == "claude-opus-5-5"  # the built-in app default
+    _wait_for(client, run["id"], {"succeeded"})
+
+    client.patch("/api/preferences", json={"default_model": "claude-sonnet-5-5"})
+    run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go"}).json()
+    assert run["model"] == "claude-sonnet-5-5"
+    _wait_for(client, run["id"], {"succeeded"})
+    assert FakeClient.instances[-1].options.model == "claude-sonnet-5-5"
+
+    assert client.patch(f"/api/projects/{p['id']}", json={"default_model": "claude-haiku-5-5"}).json()["default_model"] == "claude-haiku-5-5"
+    run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go"}).json()
+    assert run["model"] == "claude-haiku-5-5"
+    _wait_for(client, run["id"], {"succeeded"})
+
+    # The session's own choice wins over both defaults.
+    run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go", "model": "claude-fable-5-2"}).json()
+    assert run["model"] == "claude-fable-5-2"
+    _wait_for(client, run["id"], {"succeeded"})
+    assert FakeClient.instances[-1].options.model == "claude-fable-5-2"
+
+    # Clearing the project's default falls back to the app's.
+    assert client.patch(f"/api/projects/{p['id']}", json={"default_model": None}).json()["default_model"] is None
+    run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go"}).json()
+    assert run["model"] == "claude-sonnet-5-5"
+    _wait_for(client, run["id"], {"succeeded"})
+
+
+def test_unknown_model_is_rejected(make_client, tmp_path):
+    client = make_client(lambda opts: FakeClient(opts))
+    p, _ = _setup(client, tmp_path)
+    assert client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go", "model": "--help"}).status_code == 422
+    assert client.patch(f"/api/projects/{p['id']}", json={"default_model": "gpt-5"}).status_code == 422
+    assert client.patch("/api/preferences", json={"default_model": "gpt-5"}).status_code == 422
+
+
+def test_follow_up_keeps_or_switches_the_model(make_client, tmp_path):
+    client = make_client(lambda opts: FakeClient(opts))
+    p, _ = _setup(client, tmp_path)
+    run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go", "model": "claude-sonnet-5-5"}).json()
+    _wait_for(client, run["id"], {"succeeded"})
+
+    same = client.post(f"/api/runs/{run['id']}/follow-up", json={"prompt": "more"}).json()
+    assert same["model"] == "claude-sonnet-5-5"
+    _wait_for(client, same["id"], {"succeeded"})
+
+    switched = client.post(f"/api/runs/{same['id']}/follow-up", json={"prompt": "harder", "model": "claude-opus-5-5"}).json()
+    assert switched["model"] == "claude-opus-5-5"
+    _wait_for(client, switched["id"], {"succeeded"})
+    assert FakeClient.instances[-1].options.model == "claude-opus-5-5"
+    assert FakeClient.instances[-1].options.resume == "sess-1"
+
+
+def test_attention_lists_waiting_then_unseen_finished_sessions(make_client, tmp_path):
+    client = make_client(lambda opts: FakeClient(opts, ask_permission=opts.permission_mode == "default"))
+    p, _ = _setup(client, tmp_path)
+    assert client.get("/api/sessions/attention").json() == []
+
+    done = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "finish", "permission_mode": "acceptEdits"}).json()
+    _wait_for(client, done["id"], {"succeeded"})
+    waiting = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "ask", "permission_mode": "default"}).json()
+    _wait_for(client, waiting["id"], {"waiting_approval"})
+
+    items = client.get("/api/sessions/attention").json()
+    assert [(a["run_id"], a["status"]) for a in items] == [(waiting["id"], "waiting_approval"), (done["id"], "succeeded")]
+    assert items[0]["pending_tool"] == "Bash"
+    assert items[1]["title"] == "finish"
+    assert items[1]["result"] == "Done: listed files."
+
+    # Seeing the finished run drops it; seeing a run that's still going does nothing.
+    assert client.post(f"/api/runs/{done['id']}/seen").json()["seen"] is True
+    assert client.post(f"/api/runs/{waiting['id']}/seen").json()["seen"] is False
+    assert [a["run_id"] for a in client.get("/api/sessions/attention").json()] == [waiting["id"]]
+
+
+def test_attention_shows_a_session_once_under_its_first_prompt(make_client, tmp_path):
+    client = make_client(lambda opts: FakeClient(opts))
+    p, _ = _setup(client, tmp_path)
+    first = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "start here"}).json()
+    _wait_for(client, first["id"], {"succeeded"})
+    second = client.post(f"/api/runs/{first['id']}/follow-up", json={"prompt": "and then"}).json()
+    _wait_for(client, second["id"], {"succeeded"})
+
+    items = client.get("/api/sessions/attention").json()
+    assert len(items) == 1
+    assert (items[0]["root_run_id"], items[0]["run_id"], items[0]["title"]) == (first["id"], second["id"], "start here")

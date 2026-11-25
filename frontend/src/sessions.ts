@@ -1,13 +1,54 @@
-import type { AgentRun, RunStatus } from "./types";
+import type { AgentRun, RunStatus, SessionAttention } from "./types";
 
 export const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set(["queued", "running", "waiting_approval"]);
 
 /** How to name a run in lists: its prompt, or its images when the user only pasted those. */
 export function runLabel(run: AgentRun): string {
-  const text = run.prompt.trim();
+  return label(run.prompt, run.images?.length ?? 0);
+}
+
+/** The same, for a session in the sidebar's Sessions list. */
+export function attentionLabel(a: SessionAttention): string {
+  return label(a.title, a.image_count) || "Untitled session";
+}
+
+function label(prompt: string, images: number): string {
+  const text = prompt.trim();
   if (text) return text;
-  const n = run.images?.length ?? 0;
-  return n ? `[${n === 1 ? "image" : `${n} images`}]` : "";
+  return images ? `[${images === 1 ? "image" : `${images} images`}]` : "";
+}
+
+/** What a session in the Sessions list is doing, from the user's point of view. */
+export type AttentionState = "needs_you" | "done" | "failed" | "working";
+
+export function attentionState(a: SessionAttention): AttentionState {
+  if (a.status === "waiting_approval") return "needs_you";
+  if (a.status === "succeeded") return "done";
+  if (a.status === "failed") return "failed";
+  return "working";
+}
+
+/** One line on what a session is doing or waiting for. */
+export function attentionDetail(a: SessionAttention): string {
+  switch (attentionState(a)) {
+    case "needs_you":
+      return a.pending_tool === "AskUserQuestion"
+        ? "Has a question"
+        : a.pending_tool
+          ? `Needs approval: ${toolName(a.pending_tool)}`
+          : "Needs you";
+    case "done":
+      return "Done";
+    case "failed":
+      return "Failed";
+    default:
+      return a.status === "queued" ? "Starting…" : "Working…";
+  }
+}
+
+/** mcp__mercury__update_task -> update_task; built-in tools are shown as they are. */
+function toolName(tool: string): string {
+  return tool.startsWith("mcp__") ? tool.split("__").slice(2).join("__") || tool : tool;
 }
 
 /** A session is a run plus its chain of follow-ups (which resume the same Claude session). */

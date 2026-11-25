@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api";
 import { useLoader } from "../hooks";
+import { taskRef } from "../refs";
 import { TASK_COLUMNS, type Project, type Task, type TaskStatus } from "../types";
 import { Organizer } from "./Organizer";
 import { TaskModal } from "./TaskModal";
@@ -8,7 +9,8 @@ import { TaskModal } from "./TaskModal";
 interface Props {
   project: Project;
   onRunAgent: (task: Task) => void;
-  onOpenRun: (runId: number) => void;
+  /** "open" (from a task's session list) opens the session per the session_open_scroll setting. */
+  onOpenRun: (runId: number, scroll?: "run" | "open") => void;
   onChanged: () => void;
 }
 
@@ -102,8 +104,18 @@ export function BoardTab({ project, onRunAgent, onOpenRun, onChanged }: Props) {
                     <div className="t-meta">
                       <span className={`prio ${t.priority}`}>{t.priority}</span>
                       {t.github_issue_number && <span>#{t.github_issue_number}</span>}
+                      {t.images?.length > 0 && (
+                        <span className="task-pics" title={`${t.images.length} picture${t.images.length > 1 ? "s" : ""}`}>
+                          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                            <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" />
+                            <circle cx="5.5" cy="6.5" r="1.25" />
+                            <path d="M2.5 12.5l4-4 3 3 2-2 2.5 2.5" />
+                          </svg>
+                          {t.images.length}
+                        </span>
+                      )}
                       <span className="spacer" />
-                      <span>T-{t.id}</span>
+                      <span>{taskRef(project.key, t)}</span>
                     </div>
                   </div>
                 ))}
@@ -124,6 +136,7 @@ export function BoardTab({ project, onRunAgent, onOpenRun, onChanged }: Props) {
       {openTask && (
         <TaskModal
           task={openTask}
+          projectKey={project.key}
           canRunAgent={!!project.repo_path}
           onClose={() => setOpenTask(null)}
           onSaved={() => {
@@ -138,7 +151,7 @@ export function BoardTab({ project, onRunAgent, onOpenRun, onChanged }: Props) {
           onOpenRun={(runId) => {
             setOpenTask(null);
             onChanged();
-            onOpenRun(runId);
+            onOpenRun(runId, "open");
           }}
         />
       )}

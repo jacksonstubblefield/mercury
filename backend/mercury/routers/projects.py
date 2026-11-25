@@ -14,7 +14,7 @@ from ..models import (
     TaskStatus,
     utcnow,
 )
-from ..services import attachments, gitinfo
+from ..services import attachments, gitinfo, refs
 from .deps import SessionDep, get_project_or_404
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -40,6 +40,22 @@ def _detect_github_repo(project: Project) -> None:
             pass
 
 
+def _check_key(session, raw, project_id: int | None = None) -> str:
+    try:
+        key = refs.normalize_key(raw)
+    except refs.ProjectKeyError as e:
+        raise HTTPException(422, str(e)) from e
+    if key in refs.taken_keys(session, exclude_project_id=project_id):
+        raise HTTPException(409, f"Another project already uses the key {key}.")
+    return key
+
+
+@router.get("/suggest-key")
+def suggest_key(name: str, session: SessionDep):
+    """The key a new project called `name` would get if none is given."""
+    return {"key": refs.suggest_key(name, refs.taken_keys(session))}
+
+
 @router.get("", response_model=list[ProjectRead])
 def list_projects(session: SessionDep):
     projects = session.exec(select(Project).order_by(Project.status, Project.name)).all()
@@ -48,7 +64,8 @@ def list_projects(session: SessionDep):
 
 @router.post("", response_model=ProjectRead, status_code=201)
 def create_project(body: ProjectCreate, session: SessionDep):
-    project = Project.model_validate(body)
+    key = _check_key(session, body.key) if body.key else None  # None: refs generates one
+    project = Project.model_validate(body.model_dump(exclude={"key"}), update={"key": key})
     _detect_github_repo(project)
     session.add(project)
     session.commit()
@@ -64,7 +81,10 @@ def get_project(project_id: int, session: SessionDep):
 @router.patch("/{project_id}", response_model=ProjectRead)
 def update_project(project_id: int, body: ProjectUpdate, session: SessionDep):
     project = get_project_or_404(session, project_id)
-    project.sqlmodel_update(body.model_dump(exclude_unset=True))
+    changes = body.model_dump(exclude_unset=True)
+    if "key" in changes:
+        changes["key"] = _check_key(session, changes["key"], project_id)
+    project.sqlmodel_update(changes)
     _detect_github_repo(project)
     project.updated_at = utcnow()
     session.add(project)
@@ -77,7 +97,8 @@ def update_project(project_id: int, body: ProjectUpdate, session: SessionDep):
 def delete_project(project_id: int, session: SessionDep):
     project = get_project_or_404(session, project_id)
     runs = session.exec(select(AgentRun).where(AgentRun.project_id == project_id)).all()
-    images = [name for run in runs for name in run.images]
+    tasks = session.exec(select(Task).where(Task.project_id == project_id)).all()
+    images = [name for run in runs for name in run.images] + [name for task in tasks for name in task.images]
     session.delete(project)
     session.commit()
     attachments.delete(images)

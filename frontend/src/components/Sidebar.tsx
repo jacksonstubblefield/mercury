@@ -1,4 +1,5 @@
-import type { Project, ProjectStatus } from "../types";
+import { attentionDetail, attentionLabel, attentionState } from "../sessions";
+import type { Project, ProjectStatus, SessionAttention } from "../types";
 
 const GROUPS: { status: ProjectStatus; label: string }[] = [
   { status: "active", label: "Active" },
@@ -16,14 +17,49 @@ interface Props {
   /** The app page open instead of a project, if any. */
   page: Page | null;
   onOpenPage: (page: Page) => void;
+  /** Sessions that are running, waiting on the user, or finished and not yet looked at. */
+  sessions: SessionAttention[];
+  onOpenSession: (session: SessionAttention) => void;
 }
 
-export function Sidebar({ projects, selectedId, onSelect, onNew, page, onOpenPage }: Props) {
+export function Sidebar({ projects, selectedId, onSelect, onNew, page, onOpenPage, sessions, onOpenSession }: Props) {
+  const byId = new Map(projects.map((p) => [p.id, p]));
+  const shown = sessions.filter((s) => byId.has(s.project_id));
   return (
     <aside className="sidebar">
       <div className="brand">
         <img className="brand-icon" src="/favicon-64.png" alt="" /> Mercury
       </div>
+      {shown.length > 0 && (
+        <div className="sidebar-sessions">
+          <div className="sidebar-heading">Sessions</div>
+          {shown.map((s) => {
+            const project = byId.get(s.project_id)!;
+            const state = attentionState(s);
+            const label = attentionLabel(s);
+            return (
+              <div
+                key={s.root_run_id}
+                className={`session-item ${state}`}
+                onClick={() => onOpenSession(s)}
+                title={`${project.name}: ${label}`}
+              >
+                <span className={`session-state ${state}`} aria-hidden="true">
+                  {state === "done" ? "✓" : state === "failed" ? "!" : ""}
+                </span>
+                <span className="session-text">
+                  <span className="name">{label}</span>
+                  <span className="session-meta">
+                    <span className="dot" style={{ background: project.color, width: 6, height: 6 }} />
+                    <span className="session-project">{project.name}</span>
+                    <span className={`session-detail ${state}`}>{attentionDetail(s)}</span>
+                  </span>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div className="sidebar-section">
         {GROUPS.map(({ status, label }) => {
           const group = projects.filter((p) => p.status === status);

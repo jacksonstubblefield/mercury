@@ -133,7 +133,8 @@ def test_agent_collection_tools(client):
 
     gone, _ = _call(tools, "delete_collection", collection_id=renamed["id"])
     assert gone["docs_moved_to"] is None
-    assert client.get(f"/api/docs/{loose['id']}").json()["collection_id"] is None
+    stored = {d["title"]: d for d in client.get(f"/api/projects/{p['id']}/docs").json()}
+    assert stored["SQLite indexes"]["collection_id"] is None
 
 
 def test_collection_summaries_wait_for_quiet_and_fresh_contents(client):

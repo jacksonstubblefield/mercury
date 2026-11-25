@@ -91,6 +91,10 @@ def _task(client, project_id, **fields):
     return client.post(f"/api/projects/{project_id}/tasks", json=fields).json()
 
 
+def _ref(project, task):
+    return f"{project['key']}-{task['number']}"
+
+
 def test_merge_tasks_folds_duplicates_without_losing_anything(make_client):
     from mercury.services.mercury_tools import build_organizer_task_tools
 
@@ -104,15 +108,15 @@ def test_merge_tasks_folds_duplicates_without_losing_anything(make_client):
         s.commit()
     tools = build_organizer_task_tools(p["id"])
 
-    result, err = _call(tools, "merge_tasks", keep_id=keep["id"], merge_ids=[dup["id"], blank["id"]], title="Add dark mode")
+    result, err = _call(tools, "merge_tasks", keep_id=_ref(p, keep), merge_ids=[_ref(p, dup), blank["number"]], title="Add dark mode")
     assert not err, result
-    assert result["deleted"] == [dup["id"], blank["id"]]
+    assert result["deleted"] == [_ref(p, dup), _ref(p, blank)]
 
     kept = client.get(f"/api/tasks/{keep['id']}").json()
     assert kept["title"] == "Add dark mode"
     assert "Use CSS variables." in kept["description"]
-    assert f"### From T-{dup['id']}: add dark theme!!\n\nRemember the sidebar." in kept["description"]
-    assert f"T-{blank['id']} (dark mode pls)" in kept["description"]  # the merge is noted
+    assert f"### From {_ref(p, dup)}: add dark theme!!\n\nRemember the sidebar." in kept["description"]
+    assert f"{_ref(p, blank)} (dark mode pls)" in kept["description"]  # the merge is noted
     assert kept["priority"] == "high" and kept["status"] == "todo"  # highest priority, furthest status
     assert client.get(f"/api/tasks/{dup['id']}").status_code == 404
     runs = client.get(f"/api/projects/{p['id']}/runs?task_id={keep['id']}").json()
@@ -139,20 +143,20 @@ def test_merge_tasks_refuses_what_it_shouldnt_fold_away(make_client):
     tools = build_organizer_task_tools(p["id"])
 
     for merge_ids, expected in [
-        ([done["id"]], "is done"),
-        ([issue["id"]], "GitHub issue #7"),
-        ([busy["id"]], "agent running"),
-        ([foreign["id"]], "Not tasks in this project"),
-        ([keep["id"]], "can't also be"),
+        ([_ref(p, done)], "is done"),
+        ([_ref(p, issue)], "GitHub issue #7"),
+        ([_ref(p, busy)], "agent running"),
+        ([_ref(other, foreign)], "Not tasks in this project"),
+        ([_ref(p, keep)], "can't also be"),
     ]:
-        msg, err = _call(tools, "merge_tasks", keep_id=keep["id"], merge_ids=merge_ids)
+        msg, err = _call(tools, "merge_tasks", keep_id=_ref(p, keep), merge_ids=merge_ids)
         assert err and expected in msg, msg
-    msg, err = _call(tools, "merge_tasks", keep_id=done["id"], merge_ids=[keep["id"]])
+    msg, err = _call(tools, "merge_tasks", keep_id=_ref(p, done), merge_ids=[_ref(p, keep)])
     assert err and "is done" in msg
     assert len(client.get(f"/api/projects/{p['id']}/tasks").json()) == 4  # nothing was deleted
 
     # A GitHub-linked task can be the one that stays.
-    _, err = _call(tools, "merge_tasks", keep_id=issue["id"], merge_ids=[keep["id"]])
+    _, err = _call(tools, "merge_tasks", keep_id=_ref(p, issue), merge_ids=[_ref(p, keep)])
     assert not err
 
 
@@ -165,12 +169,12 @@ def test_reorder_tasks_orders_one_column(make_client):
     elsewhere = _task(client, p["id"], title="e", status="backlog")
     tools = build_organizer_task_tools(p["id"])
 
-    result, err = _call(tools, "reorder_tasks", status="todo", task_ids=[c["id"], a["id"]])
-    assert not err and result["order"] == [c["id"], a["id"], b["id"], d["id"]]
+    result, err = _call(tools, "reorder_tasks", status="todo", task_ids=[_ref(p, c), a["number"]])
+    assert not err and result["order"] == [_ref(p, c), _ref(p, a), _ref(p, b), _ref(p, d)]
     todo = [t for t in client.get(f"/api/projects/{p['id']}/tasks").json() if t["status"] == "todo"]
     assert [t["id"] for t in sorted(todo, key=lambda t: t["position"])] == [c["id"], a["id"], b["id"], d["id"]]
 
-    msg, err = _call(tools, "reorder_tasks", status="todo", task_ids=[elsewhere["id"]])
+    msg, err = _call(tools, "reorder_tasks", status="todo", task_ids=[_ref(p, elsewhere)])
     assert err and "Not in the todo column" in msg
 
 
@@ -178,6 +182,7 @@ def test_list_tasks_full_descriptions():
     from mercury.services import mercury_tools
 
     long = "x" * (mercury_tools.MAX_LISTED_DESCRIPTION + 50)
-    task = Task(id=1, project_id=1, title="t", description=long)
-    assert mercury_tools._task_dict(task, full=False)["description"].endswith("…")
-    assert mercury_tools._task_dict(task, full=True)["description"] == long
+    task = Task(id=1, project_id=1, number=4, title="t", description=long)
+    assert mercury_tools._task_dict(task, "DEM", full=False)["description"].endswith("…")
+    assert mercury_tools._task_dict(task, "DEM", full=True)["description"] == long
+    assert mercury_tools._task_dict(task, "DEM")["id"] == "DEM-4"
