@@ -204,7 +204,11 @@ def build_system_append(project: Project, task: Task | None) -> str:
     )
     lines.append(
         f"Mercury's app-wide settings (the user's Settings page) can be read with mcp__{MERCURY_SERVER}__get_settings "
-        "and changed with update_settings, as far as the user allows. Only change them when the user asks you to."
+        "and changed with update_settings, as far as the user allows. Only change them when the user asks you to. "
+        "Mercury's look (the Appearance page) works the same way: read it with get_appearance; at the user's "
+        "request, make and switch to new themes with create_theme, change or delete the user's own themes with "
+        "update_theme and delete_theme (system themes can't be changed), and switch theme, colors, fonts or "
+        "corners with set_appearance."
     )
     if project.id is not None:
         lines.append("\n" + docs_instructions(project.id))

@@ -1,12 +1,14 @@
-// Themes: built-in presets, the color tokens they set, and a small store that applies the
-// user's choice to <html> as CSS custom properties and saves it to the backend.
+// Themes: the color tokens they set, and a small store that applies the user's choice to <html>
+// as CSS custom properties and saves it to the backend.
 //
-// styles.css declares the same tokens on :root with Mercury Dark's values, so the app looks right
-// before this runs. Tints such as the diff backgrounds are derived in CSS with color-mix().
+// The themes themselves (system and the user's own) come from the backend (services/themes.py),
+// which agents can change too, so the store polls for changes. Only Mercury Dark is built in here,
+// for painting before the backend answers; styles.css declares the same values on :root.
+// Tints such as the diff backgrounds are derived in CSS with color-mix().
 
 import { useSyncExternalStore } from "react";
 import { api } from "./api";
-import type { Appearance } from "./types";
+import type { Appearance, Theme } from "./types";
 
 // --------------------------------------------------------------------------- tokens
 
@@ -74,144 +76,37 @@ export const TOKEN_GROUPS: { title: string; tokens: TokenInfo[] }[] = [
 
 export const DERIVED_TOKENS: DerivedToken[] = ["--accent-dim", "--on-accent"];
 
-// --------------------------------------------------------------------------- presets
+// --------------------------------------------------------------------------- themes
 
-export interface Preset {
-  id: string;
-  name: string;
-  colors: Palette;
-}
-
+/** STATUS_* feed paletteFromColor; they match the system themes' status colors in services/themes.py. */
 const STATUS_DARK = { "--ok": "#4fd18b", "--warn": "#f0b44c", "--err": "#ff6b6b" } as const;
 const STATUS_LIGHT = { "--ok": "#1e8a50", "--warn": "#a86a00", "--err": "#d33a3a" } as const;
 
-export const PRESETS: Preset[] = [
-  {
-    id: "mercury-dark",
-    name: "Mercury Dark",
-    colors: {
-      "--bg": "#0f1115",
-      "--bg-elev": "#161920",
-      "--bg-elev-2": "#1d212a",
-      "--bg-hover": "#232835",
-      "--border": "#2a2f3b",
-      "--text": "#e6e8ee",
-      "--text-dim": "#9aa1b2",
-      "--text-faint": "#6b7285",
-      "--accent": "#7c8cff",
-      ...STATUS_DARK,
-    },
+/** Mercury Dark, used until the backend's theme list arrives (and for a theme that's gone). */
+export const FALLBACK_THEME: Theme = {
+  id: "mercury-dark",
+  name: "Mercury Dark",
+  system: true,
+  colors: {
+    "--bg": "#0f1115",
+    "--bg-elev": "#161920",
+    "--bg-elev-2": "#1d212a",
+    "--bg-hover": "#232835",
+    "--border": "#2a2f3b",
+    "--text": "#e6e8ee",
+    "--text-dim": "#9aa1b2",
+    "--text-faint": "#6b7285",
+    "--accent": "#7c8cff",
+    ...STATUS_DARK,
   },
-  {
-    id: "mercury-light",
-    name: "Mercury Light",
-    colors: {
-      "--bg": "#fbfbfd",
-      "--bg-elev": "#f1f2f6",
-      "--bg-elev-2": "#e6e8ef",
-      "--bg-hover": "#dfe2ea",
-      "--border": "#d3d7e0",
-      "--text": "#1d2130",
-      "--text-dim": "#555d72",
-      "--text-faint": "#868da0",
-      "--accent": "#4f5fe0",
-      ...STATUS_LIGHT,
-    },
-  },
-  {
-    id: "hot-pink",
-    name: "Hot Pink",
-    colors: {
-      "--bg": "#1a0a14",
-      "--bg-elev": "#250f1d",
-      "--bg-elev-2": "#321428",
-      "--bg-hover": "#3d1932",
-      "--border": "#521f43",
-      "--text": "#ffe8f4",
-      "--text-dim": "#e9a6cb",
-      "--text-faint": "#a86b8d",
-      "--accent": "#ff3ea5",
-      "--ok": "#5ee0a0",
-      "--warn": "#ffc35c",
-      "--err": "#ff7348",
-    },
-  },
-  {
-    id: "midnight",
-    name: "Midnight",
-    colors: {
-      "--bg": "#0a0e17",
-      "--bg-elev": "#111726",
-      "--bg-elev-2": "#18203a",
-      "--bg-hover": "#1f2947",
-      "--border": "#263152",
-      "--text": "#dce6f5",
-      "--text-dim": "#8ea0bf",
-      "--text-faint": "#5d6c8a",
-      "--accent": "#4cc9f0",
-      ...STATUS_DARK,
-    },
-  },
-  {
-    id: "forest",
-    name: "Forest",
-    colors: {
-      "--bg": "#0d1310",
-      "--bg-elev": "#131b17",
-      "--bg-elev-2": "#1a251f",
-      "--bg-hover": "#202f27",
-      "--border": "#2a3b32",
-      "--text": "#e1ebe4",
-      "--text-dim": "#97ab9e",
-      "--text-faint": "#66796d",
-      "--accent": "#7fd49b",
-      "--ok": "#b5e06a",
-      "--warn": "#f0b44c",
-      "--err": "#ff7b6b",
-    },
-  },
-  {
-    id: "ember",
-    name: "Ember",
-    colors: {
-      "--bg": "#14100e",
-      "--bg-elev": "#1c1613",
-      "--bg-elev-2": "#251d19",
-      "--bg-hover": "#2e241f",
-      "--border": "#3a2e27",
-      "--text": "#f0e6df",
-      "--text-dim": "#b2a194",
-      "--text-faint": "#7d6e63",
-      "--accent": "#ff9f68",
-      ...STATUS_DARK,
-    },
-  },
-  {
-    id: "paper",
-    name: "Paper",
-    colors: {
-      "--bg": "#fffdf8",
-      "--bg-elev": "#f6f2e9",
-      "--bg-elev-2": "#ece6da",
-      "--bg-hover": "#e5ddce",
-      "--border": "#d9cfbd",
-      "--text": "#2b2620",
-      "--text-dim": "#6b6153",
-      "--text-faint": "#9a8f7f",
-      "--accent": "#c2410c",
-      ...STATUS_LIGHT,
-    },
-  },
-];
+};
 
-export const DEFAULT_PRESET = PRESETS[0];
-
-export function findPreset(id: string): Preset {
-  return PRESETS.find((p) => p.id === id) ?? DEFAULT_PRESET;
+export function findTheme(themes: Theme[], id: string): Theme {
+  return themes.find((t) => t.id === id) ?? themes.find((t) => t.id === FALLBACK_THEME.id) ?? FALLBACK_THEME;
 }
 
 export const DEFAULT_APPEARANCE: Appearance = {
-  preset: DEFAULT_PRESET.id,
+  preset: FALLBACK_THEME.id,
   colors: {},
   font_ui: null,
   font_mono: null,
@@ -328,23 +223,28 @@ function derive(key: DerivedToken, p: Palette): string {
   return contrast("#0b0d12", p["--accent"]) >= contrast("#ffffff", p["--accent"]) ? "#0b0d12" : "#ffffff";
 }
 
-/** Every color token's value for this appearance: preset, then the user's colors, then derived ones. */
-export function resolveColors(a: Appearance): Record<ColorToken, string> {
-  const base = { ...findPreset(a.preset).colors };
+/**
+ * Every color token's value for this appearance: the theme's, then the user's colors, then derived ones
+ * (unless the theme or the user pins them).
+ */
+export function resolveColors(a: Appearance, themes: Theme[] = state.themes): Record<ColorToken, string> {
+  const theme = findTheme(themes, a.preset);
+  // A theme from the backend should set every base token, but fill gaps from Mercury Dark just in case.
+  const base = { ...FALLBACK_THEME.colors } as Palette;
   for (const k of Object.keys(base) as BaseToken[]) {
-    const v = a.colors[k];
+    const v = a.colors[k] ?? theme.colors[k];
     if (v && isHex(v)) base[k] = v;
   }
   const out = { ...base } as Record<ColorToken, string>;
   for (const k of DERIVED_TOKENS) {
-    const v = a.colors[k];
+    const v = a.colors[k] ?? theme.colors[k];
     out[k] = v && isHex(v) ? v : derive(k, base);
   }
   return out;
 }
 
-export function applyAppearance(a: Appearance, root: HTMLElement = document.documentElement): void {
-  const colors = resolveColors(a);
+export function applyAppearance(a: Appearance, themes: Theme[] = state.themes, root: HTMLElement = document.documentElement): void {
+  const colors = resolveColors(a, themes);
   for (const [k, v] of Object.entries(colors)) root.style.setProperty(k, v);
   const radius = a.radius ?? DEFAULT_RADIUS;
   root.style.setProperty("--radius", `${radius}px`);
@@ -367,7 +267,8 @@ export function normalizeAppearance(raw: unknown): Appearance {
   const font = (v: unknown) => (typeof v === "string" && v.trim() && !/[;{}<>\\]/.test(v) ? v.trim().slice(0, 200) : null);
   const radius = typeof o.radius === "number" ? Math.round(Math.min(16, Math.max(0, o.radius))) : null;
   return {
-    preset: typeof o.preset === "string" ? findPreset(o.preset).id : DEFAULT_PRESET.id,
+    // Not checked against the theme list, which may not have loaded yet; an unknown id shows Mercury Dark.
+    preset: typeof o.preset === "string" && /^[a-z0-9-]{1,40}$/.test(o.preset) ? o.preset : FALLBACK_THEME.id,
     colors,
     font_ui: font(o.font_ui),
     font_mono: font(o.font_mono),
@@ -381,6 +282,8 @@ export type SaveStatus = "idle" | "saving" | "saved" | "error";
 
 interface State {
   appearance: Appearance;
+  /** System themes first, then the user's. Just Mercury Dark until the backend answers. */
+  themes: Theme[];
   status: SaveStatus;
   error: string | null;
 }
@@ -388,30 +291,46 @@ interface State {
 // Remembered in this window so a reload in dev paints the theme at once. The backend copy is
 // the real one: the packaged app gets a new origin (port) each launch, which empties localStorage.
 const CACHE_KEY = "mercury.appearance";
+const THEMES_CACHE_KEY = "mercury.themes";
 const SAVE_DELAY_MS = 400;
+// Agents can change themes and the appearance, so check the backend now and then.
+const POLL_MS = 4000;
 
-let state: State = { appearance: DEFAULT_APPEARANCE, status: "idle", error: null };
+let state: State = { appearance: DEFAULT_APPEARANCE, themes: [FALLBACK_THEME], status: "idle", error: null };
 const listeners = new Set<() => void>();
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 let saving: Promise<unknown> = Promise.resolve();
+// Bumped on every local change and finished save, so a poll that started before one is ignored.
+let generation = 0;
+let pollTimer: ReturnType<typeof setInterval> | undefined;
 
 function emit(next: Partial<State>) {
   state = { ...state, ...next };
   listeners.forEach((l) => l());
 }
 
-function cache(a: Appearance) {
+function cache(key: string, value: unknown) {
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(a));
+    localStorage.setItem(key, JSON.stringify(value));
   } catch {
     /* storage unavailable; the backend still has it */
   }
 }
 
+function normalizeThemes(raw: unknown): Theme[] | null {
+  if (!Array.isArray(raw)) return null;
+  const themes = raw.filter(
+    (t): t is Theme =>
+      !!t && typeof t === "object" && typeof t.id === "string" && typeof t.name === "string" && !!t.colors && typeof t.colors === "object",
+  );
+  return themes.length ? themes : null;
+}
+
 /** Change the theme everywhere at once; it is saved shortly after the last change. */
 export function setAppearance(a: Appearance): void {
+  generation++;
   applyAppearance(a);
-  cache(a);
+  cache(CACHE_KEY, a);
   emit({ appearance: a, status: "saving", error: null });
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
@@ -419,34 +338,59 @@ export function setAppearance(a: Appearance): void {
     // One save at a time, in order, so an older save can't land after a newer one.
     saving = saving.then(() =>
       api.saveAppearance(toSave).then(
-        () => state.appearance === toSave && emit({ status: "saved" }),
+        () => {
+          generation++;
+          if (state.appearance === toSave) emit({ status: "saved" });
+        },
         (e: unknown) => emit({ status: "error", error: e instanceof Error ? e.message : String(e) }),
       ),
     );
   }, SAVE_DELAY_MS);
 }
 
+/** Use a new theme list (after creating, renaming or deleting one). */
+export function setThemes(themes: Theme[]): void {
+  cache(THEMES_CACHE_KEY, themes);
+  emit({ themes });
+  applyAppearance(state.appearance, themes);
+}
+
+/** Fetch the themes and the saved appearance; apply what changed unless the user is mid-edit here. */
+async function sync(initial: boolean): Promise<void> {
+  const started = generation;
+  const [themes, appearance] = await Promise.all([
+    api.themes().then(normalizeThemes, () => null),
+    api.appearance().then(normalizeAppearance, () => null),
+  ]);
+  if (themes && JSON.stringify(themes) !== JSON.stringify(state.themes)) {
+    cache(THEMES_CACHE_KEY, themes);
+    emit({ themes });
+  }
+  const busy = state.status === "saving" || generation !== started || (initial && state.status !== "idle");
+  if (appearance && !busy && JSON.stringify(appearance) !== JSON.stringify(state.appearance)) {
+    cache(CACHE_KEY, appearance);
+    emit({ appearance });
+  }
+  applyAppearance(state.appearance, state.themes);
+}
+
 /** Apply the cached theme now, then the saved one from the backend. Resolves when that's done. */
 export async function loadAppearance(): Promise<void> {
   try {
+    const themes = normalizeThemes(JSON.parse(localStorage.getItem(THEMES_CACHE_KEY) ?? "null"));
+    if (themes) emit({ themes });
     const cached = localStorage.getItem(CACHE_KEY);
-    if (cached) {
-      const a = normalizeAppearance(JSON.parse(cached));
-      applyAppearance(a);
-      emit({ appearance: a });
-    }
+    if (cached) emit({ appearance: normalizeAppearance(JSON.parse(cached)) });
   } catch {
     /* bad cache: ignore it */
   }
-  try {
-    const a = normalizeAppearance(await api.appearance());
-    if (state.status !== "idle") return; // the user already changed it in this window
-    applyAppearance(a);
-    cache(a);
-    emit({ appearance: a });
-  } catch {
-    /* backend not up yet: keep the cached or default theme */
+  applyAppearance(state.appearance);
+  if (pollTimer === undefined) {
+    pollTimer = setInterval(() => {
+      if (document.visibilityState === "visible") void sync(false);
+    }, POLL_MS);
   }
+  await sync(true);
 }
 
 const subscribe = (l: () => void) => {

@@ -248,8 +248,10 @@ def test_runs_get_mercury_task_tools(make_client, tmp_path):
         "mcp__mercury__update_collection",
         "mcp__mercury__delete_collection",
         "mcp__mercury__get_settings",
-    }  # delete_doc and update_settings are left to the approval rules
+        "mcp__mercury__get_appearance",
+    }  # delete_doc, update_settings and the appearance changes are left to the approval rules
     assert "mcp__mercury__get_settings" in opts.system_prompt["append"]
+    assert "get_appearance" in opts.system_prompt["append"]
     assert "mcp__mercury__list_tasks" in opts.system_prompt["append"]
     assert "mcp__mercury__browse_docs" in opts.system_prompt["append"]
     assert "PreToolUse" in opts.hooks  # Claude Code memory stays read-only
@@ -275,6 +277,32 @@ def test_update_settings_needs_approval_unless_full_auto():
     for mode in (PermissionMode.default, PermissionMode.acceptEdits, PermissionMode.plan):
         assert not allowed(mode, "mcp__mercury__update_settings")
     assert allowed(PermissionMode.bypassPermissions, "mcp__mercury__update_settings")
+
+
+def test_appearance_changes_need_approval_unless_full_auto():
+    from mercury.models import PermissionMode
+    from mercury.services.agent_runner import RunManager
+
+    allowed = RunManager._auto_allowed
+    assert allowed(PermissionMode.plan, "mcp__mercury__get_appearance")
+    for name in ("create_theme", "update_theme", "delete_theme", "set_appearance"):
+        for mode in (PermissionMode.default, PermissionMode.acceptEdits, PermissionMode.plan):
+            assert not allowed(mode, f"mcp__mercury__{name}")
+        assert allowed(PermissionMode.bypassPermissions, f"mcp__mercury__{name}")
+
+
+def test_appearance_precheck_refuses_system_themes_before_asking(client):
+    from mercury.services.mercury_tools import precheck
+
+    problem = precheck("mcp__mercury__delete_theme", {"theme_id": "mercury-dark"})
+    assert problem and "system theme" in problem
+    problem = precheck("mcp__mercury__update_theme", {"theme_id": "paper", "name": "Mine"})
+    assert problem and "system theme" in problem
+    assert precheck("mcp__mercury__set_appearance", {"theme": "nope"})
+    assert precheck("mcp__mercury__set_appearance", {"theme": "paper"}) is None
+    client.patch("/api/preferences", json={"agent_settings_access": "read"})
+    problem = precheck("mcp__mercury__create_theme", {"name": "Mine"})
+    assert problem and "Agent access" in problem
 
 
 class SettingsClient(FakeClient):

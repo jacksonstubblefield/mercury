@@ -26,6 +26,7 @@ import type {
   ScmRepoStatus,
   ScmStatus,
   Task,
+  Theme,
 } from "./types";
 
 export class ApiError extends Error {
@@ -63,6 +64,12 @@ export const api = {
   health: () => get<Health>("/api/health"),
   appearance: () => get<Appearance>("/api/appearance"),
   saveAppearance: (a: Appearance) => put<Appearance>("/api/appearance", a),
+  themes: () => get<Theme[]>("/api/appearance/themes"),
+  createTheme: (body: { name: string; colors?: Record<string, string>; based_on?: string }) =>
+    post<Theme>("/api/appearance/themes", body),
+  updateTheme: (id: string, body: { name?: string; colors?: Record<string, string | null> }) =>
+    patch<Theme>(`/api/appearance/themes/${encodeURIComponent(id)}`, body),
+  deleteTheme: (id: string) => del(`/api/appearance/themes/${encodeURIComponent(id)}`),
   preferences: () => get<Preferences>("/api/preferences"),
   /** Changes only the given settings, so the Settings page and agents don't undo each other's changes. */
   updatePreferences: (changes: Partial<Preferences>) => patch<Preferences>("/api/preferences", changes),

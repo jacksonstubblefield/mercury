@@ -49,6 +49,7 @@ def test_organize_docs_reads_repo_but_cannot_change_it_or_delete_docs(make_clien
     assert "mcp__mercury__move_docs" not in opts.disallowed_tools
     assert "mcp__mercury__merge_tasks" not in opts.allowed_tools  # board organizer only
     assert "mcp__mercury__get_settings" not in opts.allowed_tools  # settings tools are for work runs
+    assert "mcp__mercury__get_appearance" not in opts.allowed_tools
     assert "docs organizer" in opts.system_prompt
     assert "Short titles." in opts.system_prompt  # rules docs still apply
 

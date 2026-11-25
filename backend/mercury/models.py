@@ -419,10 +419,21 @@ _COLOR_TOKEN = re.compile(r"--[a-z0-9-]{1,40}")
 _PRESET_ID = re.compile(r"[a-z0-9-]{1,40}")
 
 
-class Appearance(SQLModel):
-    """The UI theme: a built-in preset plus the user's changes. Kept in appearance.json, not the database.
+def _check_color_map(colors: dict[str, str]) -> dict[str, str]:
+    if len(colors) > 64:
+        raise ValueError("too many colors")
+    for key, value in colors.items():
+        if not _COLOR_TOKEN.fullmatch(key):
+            raise ValueError(f"not a color token: {key!r}")
+        if not _HEX_COLOR.fullmatch(value):
+            raise ValueError(f"{key} must be a #rrggbb color, got {value!r}")
+    return {k: v.lower() for k, v in colors.items()}
 
-    The frontend owns the token names and presets (`frontend/src/theme.ts`); the backend only checks shapes.
+
+class Appearance(SQLModel):
+    """The UI theme: the active theme (`preset`, a system or custom theme id) plus the user's changes on top.
+
+    Kept in appearance.json, not the database. The themes themselves live in services/themes.py.
     """
 
     preset: str = "mercury-dark"
@@ -441,14 +452,7 @@ class Appearance(SQLModel):
     @field_validator("colors")
     @classmethod
     def _check_colors(cls, colors: dict[str, str]) -> dict[str, str]:
-        if len(colors) > 64:
-            raise ValueError("too many colors")
-        for key, value in colors.items():
-            if not _COLOR_TOKEN.fullmatch(key):
-                raise ValueError(f"not a color token: {key!r}")
-            if not _HEX_COLOR.fullmatch(value):
-                raise ValueError(f"{key} must be a #rrggbb color, got {value!r}")
-        return {k: v.lower() for k, v in colors.items()}
+        return _check_color_map(colors)
 
     @field_validator("font_ui", "font_mono")
     @classmethod
@@ -461,11 +465,40 @@ class Appearance(SQLModel):
         return value.strip()
 
 
+class Theme(SQLModel):
+    """A named palette. System themes ship with Mercury and can't be changed; custom ones are the user's."""
+
+    id: str
+    name: str
+    system: bool = False
+    colors: dict[str, str]  # every base token (services/themes.BASE_TOKENS), plus any derived ones it pins
+
+
+class ThemeCreate(SQLModel):
+    name: str = Field(min_length=1, max_length=60)
+    colors: dict[str, str] = Field(default_factory=dict)  # merged over `based_on`'s colors
+    based_on: Optional[str] = None  # a theme id; default: Mercury Dark
+
+    @field_validator("colors")
+    @classmethod
+    def _check_colors(cls, colors: dict[str, str]) -> dict[str, str]:
+        return _check_color_map(colors)
+
+
+class ThemeUpdate(SQLModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    # Merged into the theme's colors. null removes a derived token's pinned color (base tokens can't be removed).
+    colors: Optional[dict[str, Optional[str]]] = None
+
+
 # --------------------------------------------------------------------------- preferences
 
 
 class AgentSettingsAccess(str, Enum):
-    """How much of `Preferences` Mercury's agents may see and change (through the get/update_settings tools)."""
+    """How much of `Preferences` and the appearance (themes) Mercury's agents may see and change.
+
+    Applies to the get/update_settings tools and the appearance tools (services/mercury_tools.py).
+    """
 
     off = "off"  # agents can't read or change settings
     read = "read"  # agents can read settings
@@ -485,5 +518,6 @@ class Preferences(SQLModel):
     )
     agent_settings_access: AgentSettingsAccess = Field(
         default=AgentSettingsAccess.change,
-        description="Whether agents may read (read) or also change (change) these settings, or neither (off).",
+        description="Whether agents may read (read) or also change (change) these settings and the appearance "
+        "(themes, fonts), or neither (off).",
     )

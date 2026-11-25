@@ -320,8 +320,18 @@ export interface ClaudeUsage {
   fetched_at: string | null;
 }
 
-/** The UI theme: a preset from theme.ts plus the user's changes. Mirrors `Appearance` in models.py. */
+/** A named palette. Mirrors `Theme` in models.py; system themes can't be changed or deleted. */
+export interface Theme {
+  id: string;
+  name: string;
+  system: boolean;
+  /** Every base token -> "#rrggbb", plus any derived tokens the theme pins. */
+  colors: Record<string, string>;
+}
+
+/** The UI theme: the active theme plus the user's changes. Mirrors `Appearance` in models.py. */
 export interface Appearance {
+  /** The active theme's id (system or custom). */
   preset: string;
   /** CSS custom property (e.g. "--accent") -> "#rrggbb". Overrides the preset. */
   colors: Record<string, string>;

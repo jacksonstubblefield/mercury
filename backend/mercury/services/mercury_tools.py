@@ -13,6 +13,9 @@ the run's project, so an agent can't touch other projects:
 - Settings (Mercury's app-wide settings, in work runs only): get_settings is always
   allowed; update_settings goes through the approval rules like delete_doc. Both
   also respect the user's Settings > Agent access (services/preferences.py).
+- Appearance (in work runs only, services/themes.py): get_appearance is always allowed;
+  create_theme, update_theme, delete_theme and set_appearance go through the approval
+  rules. System themes can't be changed or deleted. Agent access applies here too.
 """
 
 from __future__ import annotations
@@ -38,7 +41,8 @@ from ..models import (
     TaskStatus,
     utcnow,
 )
-from . import doc_collections, doc_store, preferences
+from . import appearance as appearance_store
+from . import doc_collections, doc_store, preferences, themes
 
 SERVER_NAME = "mercury"
 TASK_TOOL_NAMES = ("list_tasks", "create_task", "update_task")
@@ -56,9 +60,11 @@ DOC_TOOL_NAMES = (
     "update_collection",
     "delete_collection",
 )
-SETTINGS_TOOL_NAMES = ("get_settings", "update_settings")  # only in work runs
+APPEARANCE_CHANGE_TOOL_NAMES = ("create_theme", "update_theme", "delete_theme", "set_appearance")
+# Only in work runs.
+SETTINGS_TOOL_NAMES = ("get_settings", "update_settings", "get_appearance", *APPEARANCE_CHANGE_TOOL_NAMES)
 # Tools that go through Mercury's normal approval rules instead of always being allowed.
-ASK_TOOL_NAMES = ("delete_doc", "update_settings")
+ASK_TOOL_NAMES = ("delete_doc", "update_settings", *APPEARANCE_CHANGE_TOOL_NAMES)
 
 
 def qualified(name: str) -> str:
@@ -894,6 +900,9 @@ def precheck(tool_name: str, tool_input: dict[str, Any]) -> str | None:
     """Why a Mercury tool call would fail anyway, or None. Checked before asking the user to approve it."""
     if tool_name == qualified("update_settings"):
         return preferences.change_problem(tool_input.get("changes"), by_agent=True)
+    for name in APPEARANCE_CHANGE_TOOL_NAMES:
+        if tool_name == qualified(name):
+            return appearance_problem(name, tool_input)
     return None
 
 
@@ -946,10 +955,205 @@ def build_settings_tools() -> list[SdkMcpTool[Any]]:
     return [get_settings, update_settings]
 
 
+# --------------------------------------------------------------------------- appearance
+
+
+def _appearance_access_problem(change: bool) -> str | None:
+    access = preferences.load().agent_settings_access
+    if access == AgentSettingsAccess.off:
+        return "The user has turned off agent access to Mercury's settings and appearance (Settings > Agent access)."
+    if change and access != AgentSettingsAccess.change:
+        return (
+            "The user doesn't let agents change Mercury's appearance (Settings > Agent access is "
+            f"{access.value!r}). Tell the user what to change on the Appearance page instead."
+        )
+    return None
+
+
+def appearance_problem(tool_name: str, args: dict[str, Any]) -> str | None:
+    """Why an appearance change would fail, without looking at the colors, or None. Checked before asking the user."""
+    problem = _appearance_access_problem(change=True)
+    if problem:
+        return problem
+    if tool_name in ("update_theme", "delete_theme"):
+        return themes.change_problem(args.get("theme_id"))
+    if tool_name == "create_theme" and args.get("based_on") is not None:
+        return themes.known_problem(args["based_on"])
+    if tool_name == "set_appearance" and args.get("theme") is not None:
+        return themes.known_problem(args["theme"])
+    return None
+
+
+def _appearance_result(note: str | None = None) -> dict[str, Any]:
+    current = appearance_store.load()
+    theme = themes.get(current.preset) or themes.default_theme()
+    data: dict[str, Any] = {
+        "current": {
+            "theme": theme.id,
+            "theme_name": theme.name,
+            "theme_is_system": theme.system,
+            "color_overrides": current.colors,
+            "colors": themes.resolve(current),
+            "font_ui": current.font_ui,
+            "font_mono": current.font_mono,
+            "radius": current.radius,
+        },
+        "themes": [t.model_dump() for t in themes.all_themes()],
+        "tokens": themes.BASE_TOKENS,
+        "derived_tokens": themes.DERIVED_TOKENS,
+        "notes": [
+            "Colors are #rrggbb. Every theme sets all the tokens; derived tokens are worked out from the others "
+            "unless a theme or a color override pins them.",
+            "color_overrides are the user's tweaks on top of the current theme; switching theme clears them.",
+            "font_ui / font_mono are CSS font-family lists (null: Segoe UI / Cascadia Code). radius is the corner "
+            "radius in px, 0-16 (null: 8).",
+            "System themes can't be changed or deleted; make a custom theme from one with create_theme instead.",
+            "Unless the run is in full-auto mode, the user approves each change.",
+        ],
+    }
+    if note:
+        data["note"] = note
+    return _ok(data)
+
+
+def build_appearance_tools() -> list[SdkMcpTool[Any]]:
+    colors_schema = {
+        "type": "object",
+        "additionalProperties": {"type": ["string", "null"]},
+        "description": 'Color tokens to #rrggbb, e.g. {"--accent": "#ff3ea5", "--bg": "#120914"}. '
+        "See get_appearance for the tokens.",
+    }
+
+    def refused(tool_name: str, args: dict[str, Any]) -> dict[str, Any] | None:
+        # precheck() already ran for calls the user approves, but not for ones the run's mode lets straight through.
+        problem = appearance_problem(tool_name, args)
+        return _error(f"{problem} Nothing was changed.") if problem else None
+
+    @tool(
+        "get_appearance",
+        "Read Mercury's appearance (the user's Appearance page): the active theme, the user's color tweaks, fonts "
+        "and corner radius, every theme with its colors (system and custom), and what each color token colors.",
+        {"type": "object", "properties": {}},
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def get_appearance(args: dict[str, Any]) -> dict[str, Any]:
+        problem = _appearance_access_problem(change=False)
+        return _error(problem) if problem else _appearance_result()
+
+    @tool(
+        "create_theme",
+        "Create a custom theme for the user and, by default, switch to it. It starts from based_on's colors (by "
+        "default the current theme with the user's tweaks) with your colors on top, so pass only the tokens you "
+        "change. Only when the user asks. Unless the run is in full-auto mode, the user approves it.",
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Shown on the Appearance page; must be unique."},
+                "colors": colors_schema,
+                "based_on": {"type": "string", "description": "A theme id to start from (see get_appearance)."},
+                "apply": {"type": "boolean", "description": "Switch to the new theme. Default true."},
+            },
+            "required": ["name"],
+        },
+    )
+    async def create_theme(args: dict[str, Any]) -> dict[str, Any]:
+        no = refused("create_theme", args)
+        if no:
+            return no
+        colors = args.get("colors") or {}
+        based_on = args.get("based_on")
+        if based_on is None:
+            current = appearance_store.load()
+            based_on = current.preset if themes.get(current.preset) else themes.DEFAULT_THEME_ID
+            if isinstance(colors, dict):
+                tweaks = {k: v for k, v in current.colors.items() if k in themes.TOKENS}
+                colors = {**tweaks, **colors}
+        apply = args.get("apply", True) is not False
+        try:
+            theme = themes.create(args.get("name"), colors, based_on)
+            if apply:
+                themes.set_appearance({"theme": theme.id, "clear_colors": True})
+        except themes.ThemeError as exc:
+            return _error(f"{exc} Nothing was changed.")
+        return _appearance_result(f"Created {theme.name!r} ({theme.id}){' and switched to it' if apply else ''}.")
+
+    @tool(
+        "update_theme",
+        "Rename one of the user's custom themes or change its colors (merged in: only the tokens you pass change, "
+        "and null drops a pinned derived token). System themes can't be changed. Only when the user asks. Unless "
+        "the run is in full-auto mode, the user approves it.",
+        {
+            "type": "object",
+            "properties": {"theme_id": {"type": "string"}, "name": {"type": "string"}, "colors": colors_schema},
+            "required": ["theme_id"],
+        },
+    )
+    async def update_theme(args: dict[str, Any]) -> dict[str, Any]:
+        no = refused("update_theme", args)
+        if no:
+            return no
+        if "name" not in args and not args.get("colors"):
+            return _error("Pass a new name and/or colors. Nothing was changed.")
+        try:
+            theme = themes.update(args.get("theme_id"), args.get("name"), args.get("colors"))
+        except themes.ThemeError as exc:
+            return _error(f"{exc} Nothing was changed.")
+        return _appearance_result(f"Updated {theme.name!r} ({theme.id}).")
+
+    @tool(
+        "delete_theme",
+        "Delete one of the user's custom themes. System themes can't be deleted. If it's the active theme, "
+        "Mercury switches back to Mercury Dark. Only when the user asks. Unless the run is in full-auto mode, the "
+        "user approves it.",
+        {"type": "object", "properties": {"theme_id": {"type": "string"}}, "required": ["theme_id"]},
+        annotations=ToolAnnotations(destructiveHint=True),
+    )
+    async def delete_theme(args: dict[str, Any]) -> dict[str, Any]:
+        no = refused("delete_theme", args)
+        if no:
+            return no
+        try:
+            theme, in_use = themes.delete(args.get("theme_id"))
+        except themes.ThemeError as exc:
+            return _error(f"{exc} Nothing was changed.")
+        after = " It was in use, so Mercury switched back to Mercury Dark." if in_use else ""
+        return _appearance_result(f"Deleted {theme.name!r} ({theme.id}).{after}")
+
+    @tool(
+        "set_appearance",
+        "Change what Mercury looks like now; only the fields you pass change. theme switches to a theme (clearing "
+        "the user's color tweaks); colors are tweaks on top of the theme (null removes one); clear_colors drops all "
+        "tweaks; font_ui, font_mono and radius set fonts and corners (null: default). To keep a look as a named "
+        "theme, use create_theme. Only when the user asks. Unless the run is in full-auto mode, the user approves it.",
+        {
+            "type": "object",
+            "properties": {
+                "theme": {"type": "string", "description": "A theme id (see get_appearance)."},
+                "colors": colors_schema,
+                "clear_colors": {"type": "boolean"},
+                "font_ui": {"type": ["string", "null"], "description": 'CSS font-family list, e.g. "Inter, sans-serif".'},
+                "font_mono": {"type": ["string", "null"], "description": "CSS font-family list for code."},
+                "radius": {"type": ["integer", "null"], "description": "Corner radius in px, 0-16."},
+            },
+        },
+    )
+    async def set_appearance(args: dict[str, Any]) -> dict[str, Any]:
+        no = refused("set_appearance", args)
+        if no:
+            return no
+        try:
+            themes.set_appearance(args)
+        except themes.ThemeError as exc:
+            return _error(f"{exc} Nothing was changed.")
+        return _appearance_result("Changed. Mercury's window picks it up within a few seconds.")
+
+    return [get_appearance, create_theme, update_theme, delete_theme, set_appearance]
+
+
 def build_mercury_server(project_id: int, organize_board: bool = False, settings: bool = False):
     tools = build_task_tools(project_id) + build_doc_tools(project_id)
     if organize_board:
         tools += build_organizer_task_tools(project_id)
     if settings:
-        tools += build_settings_tools()
+        tools += build_settings_tools() + build_appearance_tools()
     return create_sdk_mcp_server(name=SERVER_NAME, tools=tools)

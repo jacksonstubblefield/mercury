@@ -5,9 +5,8 @@ import {
   DEFAULT_FONT_UI,
   DEFAULT_RADIUS,
   DERIVED_TOKENS,
-  PRESETS,
   TOKEN_GROUPS,
-  findPreset,
+  findTheme,
   isHex,
   isLight,
   normalizeAppearance,
@@ -16,18 +15,17 @@ import {
   setAppearance,
   useAppearance,
   type ColorToken,
-  type Preset,
   type TokenInfo,
 } from "../theme";
-import type { Appearance } from "../types";
+import type { Appearance, Theme } from "../types";
 
 const UI_FONTS = ['"Segoe UI", system-ui, sans-serif', "Inter, sans-serif", "system-ui, sans-serif", "Verdana, sans-serif", "Georgia, serif"];
 const MONO_FONTS = ['"Cascadia Code", monospace', '"JetBrains Mono", monospace', "Consolas, monospace", '"Fira Code", monospace'];
 
 export function AppearancePage() {
-  const { appearance: a, status, error } = useAppearance();
-  const colors = resolveColors(a);
-  const preset = findPreset(a.preset);
+  const { appearance: a, themes, status, error } = useAppearance();
+  const colors = resolveColors(a, themes);
+  const preset = findTheme(themes, a.preset);
   const changed = Object.keys(a.colors).length;
   const update = (patch: Partial<Appearance>) => setAppearance({ ...a, ...patch });
 
@@ -58,7 +56,7 @@ export function AppearancePage() {
             <div className="card">
               <h3>Theme</h3>
               <div className="preset-grid">
-                {PRESETS.map((p) => (
+                {themes.map((p) => (
                   <PresetTile
                     key={p.id}
                     preset={p}
@@ -150,7 +148,7 @@ export function AppearancePage() {
   );
 }
 
-function PresetTile({ preset, active, customized, onPick }: { preset: Preset; active: boolean; customized: boolean; onPick: () => void }) {
+function PresetTile({ preset, active, customized, onPick }: { preset: Theme; active: boolean; customized: boolean; onPick: () => void }) {
   const c = preset.colors;
   return (
     <button className={`preset-tile ${active ? "active" : ""}`} onClick={onPick} title={`Use ${preset.name}`}>
