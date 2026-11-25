@@ -64,7 +64,8 @@ export const api = {
   appearance: () => get<Appearance>("/api/appearance"),
   saveAppearance: (a: Appearance) => put<Appearance>("/api/appearance", a),
   preferences: () => get<Preferences>("/api/preferences"),
-  savePreferences: (p: Preferences) => put<Preferences>("/api/preferences", p),
+  /** Changes only the given settings, so the Settings page and agents don't undo each other's changes. */
+  updatePreferences: (changes: Partial<Preferences>) => patch<Preferences>("/api/preferences", changes),
 
   claudeUsage: (refresh = false) => get<ClaudeUsage>(`/api/usage/claude-code${refresh ? "?refresh=true" : ""}`),
 

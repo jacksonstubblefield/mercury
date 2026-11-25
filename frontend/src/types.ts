@@ -331,8 +331,13 @@ export interface Appearance {
   radius: number | null;
 }
 
-/** App-wide preferences. Mirrors `Preferences` in models.py. */
+/** How much of the settings agents may see and change. Mirrors `AgentSettingsAccess` in models.py. */
+export type AgentSettingsAccess = "off" | "read" | "change";
+
+/** App-wide settings (the Settings page). Mirrors `Preferences` in models.py. */
 export interface Preferences {
   /** Preselected when starting a new agent session. */
   default_permission_mode: PermissionMode;
+  /** Only the user can change this; agents can't widen their own access. */
+  agent_settings_access: AgentSettingsAccess;
 }

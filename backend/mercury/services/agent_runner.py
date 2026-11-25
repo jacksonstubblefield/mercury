@@ -49,10 +49,10 @@ from ..models import (
 )
 from . import attachments, organizer
 from .agent_memory import docs_instructions, memory_hooks
-from .mercury_tools import ORGANIZER_TASK_TOOLS
+from .mercury_tools import ORGANIZER_TASK_TOOLS, SETTINGS_TOOLS
 from .mercury_tools import PREAPPROVED_TOOL_NAMES as MERCURY_TOOLS
 from .mercury_tools import SERVER_NAME as MERCURY_SERVER
-from .mercury_tools import build_mercury_server
+from .mercury_tools import build_mercury_server, precheck
 
 log = logging.getLogger(__name__)
 
@@ -201,6 +201,10 @@ def build_system_append(project: Project, task: Task | None) -> str:
     lines.append(
         "When you finish, end with a short summary of what you changed, what you verified, "
         "and anything the user still needs to do."
+    )
+    lines.append(
+        f"Mercury's app-wide settings (the user's Settings page) can be read with mcp__{MERCURY_SERVER}__get_settings "
+        "and changed with update_settings, as far as the user allows. Only change them when the user asks you to."
     )
     if project.id is not None:
         lines.append("\n" + docs_instructions(project.id))
@@ -357,6 +361,10 @@ class RunManager:
 
     def _build_options(self, run: AgentRun, project: Project, task: Task | None, resume: str | None) -> ClaudeAgentOptions:
         async def can_use_tool(tool_name: str, tool_input: dict, _ctx: ToolPermissionContext):
+            # Don't ask the user to approve a call that would fail anyway (e.g. settings agents may not change).
+            problem = precheck(tool_name, tool_input)
+            if problem:
+                return PermissionResultDeny(message=problem)
             # Honour a mode switched mid-run even if the CLI still asks.
             if self._auto_allowed(self._modes.get(run.id, run.permission_mode), tool_name):
                 return PermissionResultAllow()
@@ -378,6 +386,8 @@ class RunManager:
         options: dict[str, Any] = {}
         organize_board = run.purpose == RunPurpose.organize_board
         mercury_tools = MERCURY_TOOLS if organize_board else MERCURY_TOOLS - ORGANIZER_TASK_TOOLS
+        if run.purpose != RunPurpose.work:
+            mercury_tools -= SETTINGS_TOOLS  # organizers tidy the board or docs, nothing else
         if run.purpose == RunPurpose.work:
             cwd: str = project.repo_path  # type: ignore[assignment]  (checked in _execute)
             system_prompt: Any = {"type": "preset", "preset": "claude_code", "append": build_system_append(project, task)}
@@ -400,7 +410,9 @@ class RunManager:
             max_budget_usd=run.max_budget_usd,
             can_use_tool=can_use_tool,
             mcp_servers={
-                MERCURY_SERVER: build_mercury_server(project.id, organize_board=organize_board)
+                MERCURY_SERVER: build_mercury_server(
+                    project.id, organize_board=organize_board, settings=run.purpose == RunPurpose.work
+                )
             },
             allowed_tools=allowed,
             hooks=memory_hooks(),  # Claude Code memory is read-only in Mercury runs

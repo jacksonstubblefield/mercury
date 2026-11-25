@@ -10,6 +10,9 @@ the run's project, so an agent can't touch other projects:
   delete. Deleting goes through Mercury's normal approval rules instead of being
   pre-approved (see PREAPPROVED_TOOL_NAMES). All writes go through doc_store so
   sections and the search index stay current.
+- Settings (Mercury's app-wide settings, in work runs only): get_settings is always
+  allowed; update_settings goes through the approval rules like delete_doc. Both
+  also respect the user's Settings > Agent access (services/preferences.py).
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from ..db import get_engine
 from ..models import (
     ACTIVE_RUN_STATUSES,
     AgentRun,
+    AgentSettingsAccess,
     Doc,
     DocKind,
     DocOrigin,
@@ -34,7 +38,7 @@ from ..models import (
     TaskStatus,
     utcnow,
 )
-from . import doc_collections, doc_store
+from . import doc_collections, doc_store, preferences
 
 SERVER_NAME = "mercury"
 TASK_TOOL_NAMES = ("list_tasks", "create_task", "update_task")
@@ -52,8 +56,9 @@ DOC_TOOL_NAMES = (
     "update_collection",
     "delete_collection",
 )
+SETTINGS_TOOL_NAMES = ("get_settings", "update_settings")  # only in work runs
 # Tools that go through Mercury's normal approval rules instead of always being allowed.
-ASK_TOOL_NAMES = ("delete_doc",)
+ASK_TOOL_NAMES = ("delete_doc", "update_settings")
 
 
 def qualified(name: str) -> str:
@@ -61,9 +66,12 @@ def qualified(name: str) -> str:
     return f"mcp__{SERVER_NAME}__{name}"
 
 
-QUALIFIED_TOOL_NAMES = frozenset(qualified(n) for n in TASK_TOOL_NAMES + ORGANIZER_TASK_TOOL_NAMES + DOC_TOOL_NAMES)
+QUALIFIED_TOOL_NAMES = frozenset(
+    qualified(n) for n in TASK_TOOL_NAMES + ORGANIZER_TASK_TOOL_NAMES + DOC_TOOL_NAMES + SETTINGS_TOOL_NAMES
+)
 PREAPPROVED_TOOL_NAMES = QUALIFIED_TOOL_NAMES - {qualified(n) for n in ASK_TOOL_NAMES}
 ORGANIZER_TASK_TOOLS = frozenset(qualified(n) for n in ORGANIZER_TASK_TOOL_NAMES)
+SETTINGS_TOOLS = frozenset(qualified(n) for n in SETTINGS_TOOL_NAMES)
 
 MAX_LISTED_DESCRIPTION = 400
 MAX_MERGED_TASKS = 20
@@ -879,8 +887,69 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
     ]
 
 
-def build_mercury_server(project_id: int, organize_board: bool = False):
+# --------------------------------------------------------------------------- settings
+
+
+def precheck(tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    """Why a Mercury tool call would fail anyway, or None. Checked before asking the user to approve it."""
+    if tool_name == qualified("update_settings"):
+        return preferences.change_problem(tool_input.get("changes"), by_agent=True)
+    return None
+
+
+def _settings_result(prefs=None) -> dict[str, Any]:
+    return _ok(
+        {
+            "settings": preferences.describe(prefs),
+            "note": "Change settings with update_settings. Unless the run is in full-auto mode, the user approves each change.",
+        }
+    )
+
+
+def build_settings_tools() -> list[SdkMcpTool[Any]]:
+    @tool(
+        "get_settings",
+        "Read Mercury's app-wide settings (the user's Settings page): each setting's key, value, default, "
+        "allowed values, and whether agents may change it.",
+        {"type": "object", "properties": {}},
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def get_settings(args: dict[str, Any]) -> dict[str, Any]:
+        access = preferences.load().agent_settings_access
+        if access == AgentSettingsAccess.off:
+            return _error("The user has turned off agent access to Mercury's settings (Settings > Agent access).")
+        return _settings_result()
+
+    @tool(
+        "update_settings",
+        "Change Mercury's app-wide settings. Only change settings when the user asked you to. Unless the "
+        "run is in full-auto mode, the user is asked to approve the change. Read get_settings first for "
+        "the keys and allowed values.",
+        {
+            "type": "object",
+            "properties": {
+                "changes": {
+                    "type": "object",
+                    "description": 'Setting keys to new values, e.g. {"default_permission_mode": "plan"}.',
+                }
+            },
+            "required": ["changes"],
+        },
+    )
+    async def update_settings(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            prefs = preferences.apply_changes(args.get("changes"), by_agent=True)  # type: ignore[arg-type]
+        except preferences.SettingsError as exc:
+            return _error(f"{exc} Nothing was changed.")
+        return _settings_result(prefs)
+
+    return [get_settings, update_settings]
+
+
+def build_mercury_server(project_id: int, organize_board: bool = False, settings: bool = False):
     tools = build_task_tools(project_id) + build_doc_tools(project_id)
     if organize_board:
         tools += build_organizer_task_tools(project_id)
+    if settings:
+        tools += build_settings_tools()
     return create_sdk_mcp_server(name=SERVER_NAME, tools=tools)

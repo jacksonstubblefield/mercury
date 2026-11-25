@@ -247,7 +247,9 @@ def test_runs_get_mercury_task_tools(make_client, tmp_path):
         "mcp__mercury__create_collection",
         "mcp__mercury__update_collection",
         "mcp__mercury__delete_collection",
-    }  # delete_doc is left to the approval rules
+        "mcp__mercury__get_settings",
+    }  # delete_doc and update_settings are left to the approval rules
+    assert "mcp__mercury__get_settings" in opts.system_prompt["append"]
     assert "mcp__mercury__list_tasks" in opts.system_prompt["append"]
     assert "mcp__mercury__browse_docs" in opts.system_prompt["append"]
     assert "PreToolUse" in opts.hooks  # Claude Code memory stays read-only
@@ -262,6 +264,57 @@ def test_delete_doc_needs_approval_unless_full_auto():
     for mode in (PermissionMode.default, PermissionMode.acceptEdits, PermissionMode.plan):
         assert not allowed(mode, "mcp__mercury__delete_doc")
     assert allowed(PermissionMode.bypassPermissions, "mcp__mercury__delete_doc")
+
+
+def test_update_settings_needs_approval_unless_full_auto():
+    from mercury.models import PermissionMode
+    from mercury.services.agent_runner import RunManager
+
+    allowed = RunManager._auto_allowed
+    assert allowed(PermissionMode.plan, "mcp__mercury__get_settings")
+    for mode in (PermissionMode.default, PermissionMode.acceptEdits, PermissionMode.plan):
+        assert not allowed(mode, "mcp__mercury__update_settings")
+    assert allowed(PermissionMode.bypassPermissions, "mcp__mercury__update_settings")
+
+
+class SettingsClient(FakeClient):
+    """Asks to change Mercury's settings instead of running Bash."""
+
+    changes: dict = {}
+
+    async def receive_response(self):
+        yield SystemMessage(subtype="init", data={"session_id": "sess-1", "model": "claude-opus-5-5"})
+        name, args = "mcp__mercury__update_settings", {"changes": self.changes}
+        yield AssistantMessage(content=[ToolUseBlock(id="tu1", name=name, input=args)], model="claude-opus-5-5")
+        decision = await self.options.can_use_tool(name, args, ToolPermissionContext(tool_use_id="tu1"))
+        content = "allowed" if isinstance(decision, PermissionResultAllow) else decision.message
+        yield UserMessage(content=[ToolResultBlock(tool_use_id="tu1", content=content, is_error=False)])
+        yield ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1, session_id="sess-1", result="ok"
+        )
+
+
+def test_settings_change_asks_the_user(make_client, tmp_path):
+    SettingsClient.changes = {"default_permission_mode": "plan"}
+    client = make_client(lambda opts: SettingsClient(opts))
+    p, _ = _setup(client, tmp_path)
+    run_id = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go", "permission_mode": "acceptEdits"}).json()["id"]
+    _wait_for(client, run_id, {"waiting_approval"})
+    request = next(e for e in client.get(f"/api/runs/{run_id}/events").json() if e["kind"] == "approval_request")
+    assert request["payload"]["tool_name"] == "mcp__mercury__update_settings"
+    client.post(f"/api/runs/{run_id}/approvals/{request['payload']['approval_id']}", json={"allow": True})
+    _wait_for(client, run_id, {"succeeded"})
+
+
+def test_disallowed_settings_change_is_denied_without_asking(make_client, tmp_path):
+    SettingsClient.changes = {"agent_settings_access": "change"}  # only the user may change this
+    client = make_client(lambda opts: SettingsClient(opts))
+    p, _ = _setup(client, tmp_path)
+    run_id = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go", "permission_mode": "default"}).json()["id"]
+    _wait_for(client, run_id, {"succeeded"})
+    events = client.get(f"/api/runs/{run_id}/events").json()
+    assert not any(e["kind"] == "approval_request" for e in events)
+    assert "Only the user" in next(e for e in events if e["kind"] == "tool_result")["payload"]["content"]
 
 
 def test_task_tools_create_list_update(make_client, tmp_path):

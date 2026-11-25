@@ -464,8 +464,26 @@ class Appearance(SQLModel):
 # --------------------------------------------------------------------------- preferences
 
 
-class Preferences(SQLModel):
-    """App-wide user preferences. Kept in preferences.json next to the database, like `Appearance`."""
+class AgentSettingsAccess(str, Enum):
+    """How much of `Preferences` Mercury's agents may see and change (through the get/update_settings tools)."""
 
-    # For new agent sessions in projects that don't set their own `default_permission_mode`.
-    default_permission_mode: PermissionMode = PermissionMode.acceptEdits
+    off = "off"  # agents can't read or change settings
+    read = "read"  # agents can read settings
+    change = "change"  # agents can also change them; each change follows the run's permission mode
+
+
+class Preferences(SQLModel):
+    """App-wide settings (the Settings page). Kept in preferences.json next to the database, like `Appearance`.
+
+    Each field's description is what agents see in get_settings, so write it for them.
+    Fields listed in `services/preferences.USER_ONLY` can only be changed by the user.
+    """
+
+    default_permission_mode: PermissionMode = Field(
+        default=PermissionMode.acceptEdits,
+        description="Permission mode preselected for new agent sessions in projects that don't set their own.",
+    )
+    agent_settings_access: AgentSettingsAccess = Field(
+        default=AgentSettingsAccess.change,
+        description="Whether agents may read (read) or also change (change) these settings, or neither (off).",
+    )

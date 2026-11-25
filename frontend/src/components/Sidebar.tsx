@@ -6,7 +6,7 @@ const GROUPS: { status: ProjectStatus; label: string }[] = [
   { status: "archived", label: "Archived" },
 ];
 
-export type Page = "usage" | "appearance";
+export type Page = "usage" | "appearance" | "settings";
 
 interface Props {
   projects: Project[];
@@ -67,6 +67,18 @@ export function Sidebar({ projects, selectedId, onSelect, onNew, page, onOpenPag
             <circle cx="10.4" cy="5.1" r=".6" />
           </svg>
           <span className="name">Appearance</span>
+        </div>
+        <div
+          className={`project-item ${page === "settings" ? "active" : ""}`}
+          onClick={() => onOpenPage("settings")}
+          title="App-wide settings"
+        >
+          <svg className="nav-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6" />
+            <circle cx="10" cy="4.5" r="1.5" />
+            <circle cx="6" cy="11.5" r="1.5" />
+          </svg>
+          <span className="name">Settings</span>
         </div>
       </nav>
       <div className="sidebar-footer">

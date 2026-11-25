@@ -4,6 +4,7 @@ import { usePolling, useLoader } from "./hooks";
 import { ProjectForm } from "./components/ProjectForm";
 import { ProjectView } from "./components/ProjectView";
 import { AppearancePage } from "./components/AppearancePage";
+import { SettingsPage } from "./components/SettingsPage";
 import { Sidebar, type Page } from "./components/Sidebar";
 import { UsagePage } from "./components/UsagePage";
 
@@ -16,7 +17,7 @@ export default function App() {
     return saved ? Number(saved) : null;
   });
   const [creating, setCreating] = useState(false);
-  // An app page (Usage, Appearance) shown instead of the selected project.
+  // An app page (Usage, Appearance, Settings) shown instead of the selected project.
   const [page, setPage] = useState<Page | null>(null);
 
   // Keep run badges in the sidebar fresh.
@@ -58,6 +59,8 @@ export default function App() {
           <UsagePage />
         ) : page === "appearance" ? (
           <AppearancePage />
+        ) : page === "settings" ? (
+          <SettingsPage />
         ) : selected ? (
           <ProjectView key={selected.id} project={selected} onChanged={onChanged} />
         ) : (

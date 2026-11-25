@@ -264,7 +264,7 @@ function NewSession({
         await api.updateProject(project.id, { default_permission_mode: mode });
         onProjectChanged(); // reloads the project, so `projectDefault` catches up
       } else {
-        const saved = await api.savePreferences({ default_permission_mode: mode });
+        const saved = await api.updatePreferences({ default_permission_mode: mode });
         setAppDefault(saved.default_permission_mode);
       }
     } catch (e) {
@@ -945,6 +945,10 @@ const DOC_TOOL_LABELS: Record<string, string> = {
   update_doc: "Update doc",
   delete_doc: "Delete doc",
 };
+const SETTINGS_TOOL_LABELS: Record<string, string> = {
+  get_settings: "Read settings",
+  update_settings: "Change settings",
+};
 
 function isMercuryTool(name: string): boolean {
   return name?.startsWith(MERCURY_TOOL_PREFIX) ?? false;
@@ -957,7 +961,7 @@ function isTaskTool(name: string): boolean {
 function toolLabel(name: string): string {
   if (!isMercuryTool(name)) return name;
   const short = name.slice(MERCURY_TOOL_PREFIX.length);
-  return TASK_TOOL_LABELS[short] ?? DOC_TOOL_LABELS[short] ?? name;
+  return TASK_TOOL_LABELS[short] ?? DOC_TOOL_LABELS[short] ?? SETTINGS_TOOL_LABELS[short] ?? name;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -968,6 +972,14 @@ function taskToolSummary(input: Record<string, any>): string {
   if (input.status) parts.push(`→ ${String(input.status).replace("_", " ")}`);
   else if (input.include_done) parts.push("(incl. done)");
   return parts.join(" ");
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function settingsToolSummary(input: Record<string, any>): string {
+  const changes = input.changes && typeof input.changes === "object" ? input.changes : {};
+  return Object.entries(changes)
+    .map(([k, v]) => `${k} → ${typeof v === "string" ? v : JSON.stringify(v)}`)
+    .join(", ");
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -989,6 +1001,7 @@ function docToolSummary(input: Record<string, any>): string {
 function toolSummary(name: string, input: Record<string, any>): string {
   if (!input) return "";
   if (isTaskTool(name)) return taskToolSummary(input);
+  if (name === `${MERCURY_TOOL_PREFIX}update_settings`) return settingsToolSummary(input);
   if (isMercuryTool(name)) return docToolSummary(input);
   const v = input.command ?? input.file_path ?? input.path ?? input.pattern ?? input.url ?? input.description ?? input.query;
   if (typeof v !== "string") return "";
