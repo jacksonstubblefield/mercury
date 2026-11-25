@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api";
 import { useLoader } from "../hooks";
 import { TASK_COLUMNS, type Project, type Task, type TaskStatus } from "../types";
+import { Organizer } from "./Organizer";
 import { TaskModal } from "./TaskModal";
 
 interface Props {
@@ -50,7 +51,16 @@ export function BoardTab({ project, onRunAgent, onOpenRun, onChanged }: Props) {
   if (tasks.error) return <p className="error-text">{tasks.error}</p>;
 
   return (
-    <>
+    <div className="board-wrap">
+      <Organizer
+        project={project}
+        target="board"
+        onChanged={() => {
+          void tasks.reload();
+          onChanged();
+        }}
+        onOpenRun={onOpenRun}
+      />
       <div className="board">
         {TASK_COLUMNS.map((col) => {
           const items = all.filter((t) => t.status === col.status).sort((a, b) => a.position - b.position);
@@ -132,6 +142,6 @@ export function BoardTab({ project, onRunAgent, onOpenRun, onChanged }: Props) {
           }}
         />
       )}
-    </>
+    </div>
   );
 }

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 
 from ..db import get_engine
@@ -13,9 +14,12 @@ from ..models import (
     AgentRun,
     AgentRunCreate,
     ApprovalDecision,
+    OrganizeRequest,
+    PermissionMode,
     PermissionModeUpdate,
     Task,
 )
+from ..services import attachments, organizer, preferences
 from .deps import RunsDep, SessionDep, get_project_or_404
 
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -29,6 +33,13 @@ def _event_dict(e: AgentEvent) -> dict:
         "payload": json.loads(e.payload),
         "created_at": e.created_at.isoformat(),
     }
+
+
+def _save_images(images: list[str]) -> list[str]:
+    try:
+        return attachments.save_images(images)
+    except attachments.AttachmentError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _get_run(session, run_id: int) -> AgentRun:
@@ -56,9 +67,42 @@ async def create_run(project_id: int, body: AgentRunCreate, session: SessionDep,
         task = session.get(Task, body.task_id)
         if task is None or task.project_id != project_id:
             raise HTTPException(400, "Task does not belong to this project.")
-    if not body.prompt.strip():
+    if not body.prompt.strip() and not body.images:
         raise HTTPException(400, "Prompt is empty.")
-    run = AgentRun.model_validate(body, update={"project_id": project_id})
+    images = _save_images(body.images)
+    mode = body.permission_mode or project.default_permission_mode or preferences.load().default_permission_mode
+    run = AgentRun.model_validate(body, update={"project_id": project_id, "images": images, "permission_mode": mode})
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    runs.start(run.id)
+    return run
+
+
+@router.post("/projects/{project_id}/organize", response_model=AgentRun, status_code=201)
+async def organize(project_id: int, body: OrganizeRequest, session: SessionDep, runs: RunsDep, response: Response):
+    """Start an organizer run for the board or the docs, or return the one already running."""
+    get_project_or_404(session, project_id)
+    purpose = organizer.purpose_for(body.target)
+    active = session.exec(
+        select(AgentRun)
+        .where(
+            AgentRun.project_id == project_id,
+            AgentRun.purpose == purpose,
+            AgentRun.status.in_(list(ACTIVE_RUN_STATUSES)),
+        )
+        .order_by(AgentRun.id.desc())
+    ).first()
+    if active is not None:
+        response.status_code = 200
+        return active
+    run = AgentRun(
+        project_id=project_id,
+        purpose=purpose,
+        prompt=organizer.PROMPTS[purpose],
+        # Organizer tools are all pre-approved, so this mode never stops to ask; anything else would.
+        permission_mode=PermissionMode.default,
+    )
     session.add(run)
     session.commit()
     session.refresh(run)
@@ -95,11 +139,16 @@ async def follow_up(run_id: int, body: AgentFollowUp, session: SessionDep, runs:
         raise HTTPException(409, "Wait for this run to finish before following up.")
     if not parent.session_id:
         raise HTTPException(409, "This run has no session to continue.")
+    if not body.prompt.strip() and not body.images:
+        raise HTTPException(400, "Message is empty.")
+    images = _save_images(body.images)
     run = AgentRun(
         project_id=parent.project_id,
         task_id=parent.task_id,
         parent_run_id=parent.id,
+        purpose=parent.purpose,
         prompt=body.prompt,
+        images=images,
         model=parent.model,
         permission_mode=body.permission_mode or parent.permission_mode,
         max_budget_usd=parent.max_budget_usd,
@@ -109,6 +158,19 @@ async def follow_up(run_id: int, body: AgentFollowUp, session: SessionDep, runs:
     session.refresh(run)
     runs.start(run.id)
     return run
+
+
+@router.get("/attachments/{name}")
+def get_attachment(name: str):
+    """A pasted image, for the transcript. Names are random, so they can't be guessed."""
+    path = attachments.path_for(name)
+    if path is None:
+        raise HTTPException(404, "Attachment not found")
+    return FileResponse(
+        path,
+        media_type=attachments.media_type_for(name),
+        headers={"Cache-Control": "private, max-age=31536000, immutable", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.post("/runs/{run_id}/permission-mode", response_model=AgentRun)

@@ -41,12 +41,15 @@ from ..models import (
     AgentRun,
     PermissionMode,
     Project,
+    RunPurpose,
     RunStatus,
     Task,
     TaskStatus,
     utcnow,
 )
+from . import attachments, organizer
 from .agent_memory import docs_instructions, memory_hooks
+from .mercury_tools import ORGANIZER_TASK_TOOLS
 from .mercury_tools import PREAPPROVED_TOOL_NAMES as MERCURY_TOOLS
 from .mercury_tools import SERVER_NAME as MERCURY_SERVER
 from .mercury_tools import build_mercury_server
@@ -159,6 +162,18 @@ def serialize_message(message: Any) -> list[tuple[str, dict]]:
     return events
 
 
+def prompt_input(prompt: str, images: list[str]) -> Any:
+    """What to pass to ``client.query``: the plain prompt, or a user message with image blocks."""
+    if not images:
+        return prompt
+    content = attachments.content_blocks(prompt, images)  # read now, so a missing file fails the run up front
+
+    async def messages():
+        yield {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
+
+    return messages()
+
+
 def build_system_append(project: Project, task: Task | None) -> str:
     lines = [
         "You are running inside Mercury, the user's project manager and coding workspace.",
@@ -190,6 +205,12 @@ def build_system_append(project: Project, task: Task | None) -> str:
     if project.id is not None:
         lines.append("\n" + docs_instructions(project.id))
     return "\n".join(lines)
+
+
+def _organizer_dir():
+    path = config.data_dir() / "organizer"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 class RunManager:
@@ -354,17 +375,36 @@ class RunManager:
                 return PermissionResultAllow()
             return PermissionResultDeny(message=message or "The user denied this action in Mercury.")
 
+        options: dict[str, Any] = {}
+        organize_board = run.purpose == RunPurpose.organize_board
+        mercury_tools = MERCURY_TOOLS if organize_board else MERCURY_TOOLS - ORGANIZER_TASK_TOOLS
+        if run.purpose == RunPurpose.work:
+            cwd: str = project.repo_path  # type: ignore[assignment]  (checked in _execute)
+            system_prompt: Any = {"type": "preset", "preset": "claude_code", "append": build_system_append(project, task)}
+            allowed = sorted(mercury_tools)
+        else:
+            # Organizer runs only read the repo (if any); without one they need just an empty folder to run in.
+            cwd = project.repo_path or str(_organizer_dir())
+            system_prompt = organizer.system_prompt(project, run.purpose)
+            read_only = organizer.builtin_tools(project)
+            options["tools"] = read_only
+            options["disallowed_tools"] = organizer.disallowed_tools(run.purpose)
+            allowed = sorted(mercury_tools | set(read_only))  # nothing asks, so the run never waits on the user
+
         return ClaudeAgentOptions(
-            cwd=project.repo_path,
+            cwd=cwd,
             model=run.model or config.DEFAULT_AGENT_MODEL,
             permission_mode=run.permission_mode.value,
-            system_prompt={"type": "preset", "preset": "claude_code", "append": build_system_append(project, task)},
+            system_prompt=system_prompt,
             resume=resume,
             max_budget_usd=run.max_budget_usd,
             can_use_tool=can_use_tool,
-            mcp_servers={MERCURY_SERVER: build_mercury_server(project.id)},
-            allowed_tools=sorted(MERCURY_TOOLS),
+            mcp_servers={
+                MERCURY_SERVER: build_mercury_server(project.id, organize_board=organize_board)
+            },
+            allowed_tools=allowed,
             hooks=memory_hooks(),  # Claude Code memory is read-only in Mercury runs
+            **options,
         )
 
     async def _execute(self, run_id: int) -> None:
@@ -383,13 +423,15 @@ class RunManager:
         final: dict[str, Any] = {}
 
         try:
-            if not project or not project.repo_path:
+            if not project:
+                raise RuntimeError("This project no longer exists.")
+            if run.purpose == RunPurpose.work and not project.repo_path:
                 raise RuntimeError("This project has no local repository folder. Set one in project settings.")
             options = self._build_options(run, project, task, resume)
             client = self.client_factory(options)
             self._clients[run_id] = client
             async with client:
-                await client.query(run.prompt)
+                await client.query(prompt_input(run.prompt, run.images))
                 async for message in client.receive_response():
                     for kind, payload in serialize_message(message):
                         self._emit(run_id, kind, payload)

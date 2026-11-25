@@ -69,6 +69,9 @@ _ADDED_COLUMNS = [
     ("doc", "source_hash", "VARCHAR"),
     ("docsection", "embed_hash", "VARCHAR NOT NULL DEFAULT ''"),
     ("doc", "collection_id", "INTEGER"),
+    ("agentrun", "purpose", "VARCHAR(14) NOT NULL DEFAULT 'work'"),
+    ("agentrun", "images", "JSON NOT NULL DEFAULT '[]'"),
+    ("project", "default_permission_mode", "VARCHAR(17)"),
 ]
 
 

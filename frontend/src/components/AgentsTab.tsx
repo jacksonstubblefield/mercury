@@ -1,19 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { timeAgo, useLoader, usePolling } from "../hooks";
-import { ACTIVE_STATUSES as ACTIVE, groupSessions, type Session } from "../sessions";
+import { ACTIVE_STATUSES as ACTIVE, groupSessions, runLabel, type Session } from "../sessions";
 import type { AgentEvent, AgentRun, PermissionMode, Project, StreamMessage, Task } from "../types";
+import { BUILT_IN_DEFAULT_MODE, MODES, modeInfo } from "../permissions";
 import { Markdown } from "./Markdown";
+import { ImageStrip, MessageImages, usePastedImages } from "./PastedImages";
 import { ChangesPanel, EditCard, FilesContext, type FileEdit, fileEditsFrom, isEditTool, pathKey } from "./SessionChanges";
-
-const MODES: { value: PermissionMode; label: string; hint: string }[] = [
-  { value: "acceptEdits", label: "Auto-edit", hint: "File edits are automatic; shell commands ask you first." },
-  { value: "default", label: "Ask for everything", hint: "Every edit and command needs your approval." },
-  { value: "plan", label: "Plan only", hint: "Read-only. The agent investigates and proposes a plan." },
-  { value: "bypassPermissions", label: "Full auto", hint: "No approvals at all. Use only on trusted, committed repos." },
-];
-
-const modeInfo = (mode: PermissionMode) => MODES.find((m) => m.value === mode);
 
 function ModeSelect({
   value,
@@ -131,6 +124,7 @@ export function AgentsTab({ project, initialTask, onConsumeInitialTask, focusRun
           tasks={tasks.data ?? []}
           initialTask={initialTask}
           onConsumeInitialTask={onConsumeInitialTask}
+          onProjectChanged={onChanged}
           onCancel={sessions.length ? () => setView({ kind: "session", rootId: sessions[0].rootId }) : undefined}
           onStarted={(run) => {
             setView({ kind: "session", rootId: run.id });
@@ -172,7 +166,7 @@ function SessionItem({
   const cost = runs.reduce((sum, r) => sum + (r.cost_usd ?? 0), 0);
   return (
     <div className={`run-item ${selected ? "active" : ""}`} onClick={onSelect}>
-      <div className="prompt">{runs[0].prompt}</div>
+      <div className="prompt">{runLabel(runs[0])}</div>
       <div className="row" style={{ fontSize: 12 }}>
         <span className={`status ${latest.status}`}>{latest.status.replace("_", " ")}</span>
         {latest.task_id && <span className="faint">T-{latest.task_id}</span>}
@@ -187,13 +181,13 @@ function SessionItem({
             <div
               key={r.id}
               className="bookmark"
-              title={r.prompt}
+              title={runLabel(r)}
               onClick={(e) => {
                 e.stopPropagation();
                 onJump(r.id);
               }}
             >
-              {r.prompt}
+              {runLabel(r)}
             </div>
           ))}
         </div>
@@ -211,6 +205,7 @@ function NewSession({
   onConsumeInitialTask,
   onCancel,
   onStarted,
+  onProjectChanged,
 }: {
   project: Project;
   tasks: Task[];
@@ -218,13 +213,20 @@ function NewSession({
   onConsumeInitialTask: () => void;
   onCancel?: () => void;
   onStarted: (run: AgentRun) => void;
+  onProjectChanged: () => void;
 }) {
   const [prompt, setPrompt] = useState("");
   const [taskId, setTaskId] = useState<number | null>(null);
-  const [mode, setMode] = useState<PermissionMode>("acceptEdits");
+  // The project's own default, if it has one, else the app-wide one (loaded below).
+  const projectDefault = project.default_permission_mode;
+  const [appDefault, setAppDefault] = useState<PermissionMode | null>(null);
+  const defaultMode = projectDefault ?? appDefault;
+  const [mode, setMode] = useState<PermissionMode>(projectDefault ?? BUILT_IN_DEFAULT_MODE);
+  const modeTouched = useRef(false);
   const [budget, setBudget] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const pasted = usePastedImages();
 
   useEffect(() => {
     if (initialTask) {
@@ -234,7 +236,43 @@ function NewSession({
     }
   }, [initialTask, onConsumeInitialTask]);
 
-  const canStart = !!prompt.trim() && !busy && !!project.repo_path;
+  useEffect(() => {
+    let live = true;
+    api
+      .preferences()
+      .then((p) => live && setAppDefault(p.default_permission_mode))
+      .catch(() => {}); // keep the built-in default
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // Preselect the default once it's known (or when it changes), unless the user has already picked a mode.
+  useEffect(() => {
+    if (defaultMode && !modeTouched.current) setMode(defaultMode);
+  }, [defaultMode]);
+
+  function pickMode(next: PermissionMode) {
+    modeTouched.current = true;
+    setMode(next);
+  }
+
+  /** Saves the mode as this project's default if it has its own, else as the app-wide default. */
+  async function makeDefault() {
+    try {
+      if (projectDefault) {
+        await api.updateProject(project.id, { default_permission_mode: mode });
+        onProjectChanged(); // reloads the project, so `projectDefault` catches up
+      } else {
+        const saved = await api.savePreferences({ default_permission_mode: mode });
+        setAppDefault(saved.default_permission_mode);
+      }
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }
+
+  const canStart = (!!prompt.trim() || pasted.images.length > 0) && !busy && !!project.repo_path;
 
   async function start() {
     if (!canStart) return;
@@ -246,6 +284,7 @@ function NewSession({
         task_id: taskId,
         permission_mode: mode,
         max_budget_usd: budget ? Number(budget) : null,
+        images: pasted.payload,
       });
       onStarted(run);
     } catch (e) {
@@ -267,14 +306,17 @@ function NewSession({
           rows={5}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="What should Claude do? e.g. “Add a /health endpoint and a test for it.”"
+          placeholder="What should Claude do? e.g. “Add a /health endpoint and a test for it.” Paste or drop screenshots here too."
           onKeyDown={(e) => {
             if (isSendKey(e)) {
               e.preventDefault();
               void start();
             }
           }}
+          {...pasted.handlers}
         />
+        <ImageStrip images={pasted.images} onRemove={pasted.remove} />
+        {pasted.error && <p className="error-text">{pasted.error}</p>}
         <label>Linked task (its description is shared with the agent)</label>
         <select value={taskId ?? ""} onChange={(e) => setTaskId(e.target.value ? Number(e.target.value) : null)}>
           <option value="">None</option>
@@ -286,8 +328,26 @@ function NewSession({
         </select>
         <div className="row">
           <div style={{ flex: 2 }}>
-            <label>Permissions</label>
-            <ModeSelect value={mode} onChange={setMode} title={modeInfo(mode)?.hint} />
+            <div className="mode-label">
+              <label>Permissions</label>
+              {defaultMode !== null &&
+                (mode === defaultMode ? (
+                  <span className="faint">{projectDefault ? "Project default" : "Default"}</span>
+                ) : (
+                  <button
+                    className="link-btn"
+                    onClick={makeDefault}
+                    title={
+                      projectDefault
+                        ? "Preselect this mode for new sessions in this project"
+                        : "Preselect this mode for new sessions (projects can override it in Settings)"
+                    }
+                  >
+                    {projectDefault ? "Make project default" : "Make default"}
+                  </button>
+                ))}
+            </div>
+            <ModeSelect value={mode} onChange={pickMode} title={modeInfo(mode)?.hint} />
           </div>
           <div style={{ flex: 1 }}>
             <label>Budget ($)</label>
@@ -300,7 +360,7 @@ function NewSession({
         {error && <p className="error-text">{error}</p>}
         <div className="row">
           <span className="faint" style={{ fontSize: 12 }}>
-            Enter to start · Shift+Enter for a new line
+            Enter to start · Shift+Enter for a new line · Paste screenshots
           </span>
           <span className="spacer" />
           {onCancel && (
@@ -466,16 +526,18 @@ function SessionView({
   const [nextMode, setNextMode] = useState<PermissionMode | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const pasted = usePastedImages();
   const shownMode = active ? latest.permission_mode : nextMode ?? latest.permission_mode;
-  const canSend = !active && !!resumeFrom && !!text.trim() && !sending;
+  const canSend = !active && !!resumeFrom && (!!text.trim() || pasted.images.length > 0) && !sending;
 
   async function send() {
     if (!canSend || !resumeFrom) return;
     setActionError(null);
     setSending(true);
     try {
-      const run = await api.followUp(resumeFrom.id, text, shownMode);
+      const run = await api.followUp(resumeFrom.id, text, shownMode, pasted.payload);
       setText("");
+      pasted.clear();
       follow.current = { mode: "bottom" };
       onSent(run);
     } catch (e) {
@@ -510,8 +572,8 @@ function SessionView({
     <div className="run-view">
       <div className="run-head row">
         <span className={`status ${latest.status}`}>{latest.status.replace("_", " ")}</span>
-        <span className="session-title" title={runs[0].prompt}>
-          {runs[0].prompt}
+        <span className="session-title" title={runLabel(runs[0])}>
+          {runLabel(runs[0])}
         </span>
         <span className="spacer" />
         {latest.task_id && <span className="faint">T-{latest.task_id}</span>}
@@ -560,6 +622,7 @@ function SessionView({
 
       <div className="composer">
         {actionError && <p className="error-text">{actionError}</p>}
+        {pasted.error && <p className="error-text">{pasted.error}</p>}
         {!active && !resumeFrom && (
           <p className="faint" style={{ fontSize: 12 }}>
             This session never started, so it can't be continued. Start a new session instead.
@@ -577,7 +640,9 @@ function SessionView({
               void send();
             }
           }}
+          {...pasted.handlers}
         />
+        <ImageStrip images={pasted.images} onRemove={pasted.remove} />
         <div className="row">
           <ModeSelect
             className="small"
@@ -597,7 +662,7 @@ function SessionView({
             ) : active ? (
               "Working…"
             ) : (
-              "Enter to send · Shift+Enter for a new line"
+              "Enter to send · Shift+Enter for a new line · Paste screenshots"
             )}
           </span>
           <span className="spacer" />
@@ -734,7 +799,8 @@ function Turn({
   return (
     <div className="turn">
       <div id={`msg-${run.id}`} className={`msg-user ${flash ? "flash" : ""}`}>
-        <div className="msg-text">{run.prompt}</div>
+        <MessageImages names={run.images ?? []} />
+        {run.prompt.trim() && <div className="msg-text">{run.prompt}</div>}
         <div className="msg-meta">
           {modeInfo(run.permission_mode)?.label} · {timeAgo(run.created_at)}
         </div>

@@ -93,6 +93,8 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: "#0f1115",
     title: "Mercury",
+    // Window and taskbar icon; rebuild it with scripts/make_icon.py.
+    icon: path.join(ROOT, "assets", "icon", process.platform === "win32" ? "icon.ico" : "icon.png"),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),

@@ -1,6 +1,7 @@
 import { api } from "../api";
 import { timeAgo, useLoader } from "../hooks";
 import { TASK_COLUMNS, type Project } from "../types";
+import { runLabel } from "../sessions";
 import { Markdown } from "./Markdown";
 
 interface Props {
@@ -84,7 +85,7 @@ export function OverviewTab({ project, onOpenRun }: Props) {
           {(runs.data ?? []).slice(0, 8).map((r) => (
             <li key={r.id} style={{ cursor: "pointer" }} onClick={() => onOpenRun(r.id)}>
               <span className={`status ${r.status}`}>{r.status.replace("_", " ")}</span>
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.prompt}</span>
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{runLabel(r)}</span>
               <span className="faint" style={{ fontSize: 12 }}>
                 {timeAgo(r.created_at)}
               </span>

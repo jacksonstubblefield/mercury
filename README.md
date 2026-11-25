@@ -6,6 +6,7 @@ A desktop project manager with Claude coding agents built in. You can track all 
 
 - **Projects** are linked to a local git checkout and a GitHub repo, which is detected from the `origin` remote. The overview shows the branch, uncommitted changes, recent commits, task counts and agent spend.
 - **Board**: a kanban board with Backlog, To do, In progress, Review and Done columns. Drag cards between columns, set priorities, and write task descriptions in Markdown.
+  - **✨ Organize** starts an agent that tidies the board, so tasks can be jotted down without care. It merges duplicate tasks (the merged task keeps everything they said, and their agent sessions), gives vague tasks clear titles and descriptions, splits tasks that bundle unrelated work, and orders the Backlog and To do columns. It doesn't move tasks between columns or close them. Its summary appears on the board when it's done.
 - **Docs**: the project's long-term memory, as Markdown docs with pinning and autosave. Built to scale to thousands of docs per project.
   - Docs are split at their headings (and into ~2,000-character sections) and searched two ways at once: by words (SQLite FTS5) and by meaning, with a local embedding model (`BAAI/bge-small-en-v1.5` via fastembed, CPU only, run inside the backend). Search returns the best-matching section of each doc.
   - The model is downloaded once (~65 MB) to `~/.mercury/models` the first time the backend starts. Sections are embedded in the background, and only changed sections are re-embedded. Until a section is embedded, or if the model can't load, search falls back to words only.
@@ -17,6 +18,7 @@ A desktop project manager with Claude coding agents built in. You can track all 
   - Agents browse, search, read, create and update docs on their own initiative, record lasting knowledge as they work, and file docs into collections (creating collections when a topic needs one). Each run's instructions include the top-level collection map. Deleting a doc asks for approval unless the run is on Full auto.
   - **Import…** copies a project's Claude Code memory (`~/.claude/projects/<repo>/memory`) into docs. The memory folder is never changed; there's no ongoing sync. A long memory that's split by section is filed in its own collection.
   - Inside Mercury runs, Claude Code's memory folder is read-only: a hook blocks writes to it, and agents save to docs instead.
+  - **✨ Organize** starts an agent that tidies the docs: it files docs into collections (creating, renaming and folding collections together), combines docs that cover the same topic and marks the originals superseded, retitles vague docs and archives empty ones. It never deletes a doc.
 - **Agents**: runs Claude agents through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) in the project's folder.
   - The transcript streams live: messages, tool calls and their output.
   - A permission mode is chosen per run:
@@ -28,8 +30,11 @@ A desktop project manager with Claude coding agents built in. You can track all 
     | *Auto-edit* | File edits happen automatically; shell commands need approval |
     | *Full auto* | No approvals |
 
+    New sessions start in your default mode (*Auto-edit* until you change it). Pick another mode in the New session form and click **Make default** to change it. The default is saved in `~/.mercury/preferences.json`. A project can set its own default in **Settings**, and that overrides the app-wide one.
+
   - When a tool call needs permission, the run pauses and shows **Allow / Deny** buttons in the transcript.
   - You can link a run to a task. The agent then sees the task's description, the task moves to *In progress* when the run starts, and to *Review* when it succeeds.
+  - Organizer runs (the **✨ Organize** buttons) only use Mercury's task and doc tools, plus read-only access to the repo. They never edit files, run commands or ask for approval, and they work in projects without a repo folder too.
   - **Follow-ups** continue the same Claude session. Each run records its cost and number of turns, and you can set an optional budget cap ($) per run.
 - **Source Control**: a VS Code-style view of the project's git checkout.
   - Staged changes, unstaged changes, untracked files and merge conflicts are listed, with stage, unstage and discard on each file or group. Click a file to see its diff.

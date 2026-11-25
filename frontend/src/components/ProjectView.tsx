@@ -74,7 +74,7 @@ export function ProjectView({ project, onChanged }: Props) {
       <section className="content">
         {tab === "overview" && <OverviewTab project={project} onOpenRun={openRun} />}
         {tab === "board" && <BoardTab project={project} onRunAgent={runAgentOn} onOpenRun={openRun} onChanged={onChanged} />}
-        {tab === "docs" && <DocsTab project={project} />}
+        {tab === "docs" && <DocsTab project={project} onOpenRun={openRun} />}
         {tab === "agents" && (
           <AgentsTab
             project={project}

@@ -14,7 +14,7 @@ from ..models import (
     TaskStatus,
     utcnow,
 )
-from ..services import gitinfo
+from ..services import attachments, gitinfo
 from .deps import SessionDep, get_project_or_404
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -76,8 +76,11 @@ def update_project(project_id: int, body: ProjectUpdate, session: SessionDep):
 @router.delete("/{project_id}", status_code=204)
 def delete_project(project_id: int, session: SessionDep):
     project = get_project_or_404(session, project_id)
+    runs = session.exec(select(AgentRun).where(AgentRun.project_id == project_id)).all()
+    images = [name for run in runs for name in run.images]
     session.delete(project)
     session.commit()
+    attachments.delete(images)
 
 
 @router.get("/{project_id}/git")

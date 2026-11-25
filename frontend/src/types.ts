@@ -12,6 +12,8 @@ export interface Project {
   github_repo: string | null;
   status: ProjectStatus;
   color: string;
+  /** Preselected for new agent sessions. null: the app-wide default (Preferences). */
+  default_permission_mode: PermissionMode | null;
   created_at: string;
   updated_at: string;
   open_tasks: number;
@@ -140,17 +142,23 @@ export interface MemoryImportPreview {
   items: MemoryImportItem[];
 }
 
+/** What a run is for: coding work, or tidying the board or the docs (the Organize buttons). */
+export type RunPurpose = "work" | "organize_board" | "organize_docs";
+
 export interface AgentRun {
   id: number;
   project_id: number;
   task_id: number | null;
   parent_run_id: number | null;
+  purpose: RunPurpose;
   prompt: string;
   model: string | null;
   permission_mode: PermissionMode;
   max_budget_usd: number | null;
   status: RunStatus;
   session_id: string | null;
+  /** Pasted images sent with the prompt; load them from api.attachmentUrl(name). */
+  images: string[];
   result: string | null;
   error: string | null;
   cost_usd: number | null;
@@ -310,4 +318,21 @@ export interface ClaudeUsage {
   plan: string | null;
   windows: UsageWindow[];
   fetched_at: string | null;
+}
+
+/** The UI theme: a preset from theme.ts plus the user's changes. Mirrors `Appearance` in models.py. */
+export interface Appearance {
+  preset: string;
+  /** CSS custom property (e.g. "--accent") -> "#rrggbb". Overrides the preset. */
+  colors: Record<string, string>;
+  font_ui: string | null;
+  font_mono: string | null;
+  /** Corner radius in px, 0-16. null means the default. */
+  radius: number | null;
+}
+
+/** App-wide preferences. Mirrors `Preferences` in models.py. */
+export interface Preferences {
+  /** Preselected when starting a new agent session. */
+  default_permission_mode: PermissionMode;
 }

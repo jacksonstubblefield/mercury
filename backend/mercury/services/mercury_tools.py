@@ -4,6 +4,8 @@ They are served from an in-process MCP server (one per run) and are scoped to
 the run's project, so an agent can't touch other projects:
 
 - Tasks: list, create and update (including marking done), but not delete.
+  Board organizer runs also get merge_tasks (which folds duplicates into one task
+  without losing what they say) and reorder_tasks.
 - Docs (the project's long-term memory): search, list, read, create, update and
   delete. Deleting goes through Mercury's normal approval rules instead of being
   pre-approved (see PREAPPROVED_TOOL_NAMES). All writes go through doc_store so
@@ -20,11 +22,23 @@ from claude_agent_sdk import SdkMcpTool, ToolAnnotations, create_sdk_mcp_server,
 from sqlmodel import Session, func, select
 
 from ..db import get_engine
-from ..models import Doc, DocKind, DocOrigin, DocStatus, Task, TaskPriority, TaskStatus, utcnow
+from ..models import (
+    ACTIVE_RUN_STATUSES,
+    AgentRun,
+    Doc,
+    DocKind,
+    DocOrigin,
+    DocStatus,
+    Task,
+    TaskPriority,
+    TaskStatus,
+    utcnow,
+)
 from . import doc_collections, doc_store
 
 SERVER_NAME = "mercury"
 TASK_TOOL_NAMES = ("list_tasks", "create_task", "update_task")
+ORGANIZER_TASK_TOOL_NAMES = ("merge_tasks", "reorder_tasks")  # only in board organizer runs
 DOC_TOOL_NAMES = (
     "browse_docs",
     "search_docs",
@@ -47,10 +61,12 @@ def qualified(name: str) -> str:
     return f"mcp__{SERVER_NAME}__{name}"
 
 
-QUALIFIED_TOOL_NAMES = frozenset(qualified(n) for n in TASK_TOOL_NAMES + DOC_TOOL_NAMES)
+QUALIFIED_TOOL_NAMES = frozenset(qualified(n) for n in TASK_TOOL_NAMES + ORGANIZER_TASK_TOOL_NAMES + DOC_TOOL_NAMES)
 PREAPPROVED_TOOL_NAMES = QUALIFIED_TOOL_NAMES - {qualified(n) for n in ASK_TOOL_NAMES}
+ORGANIZER_TASK_TOOLS = frozenset(qualified(n) for n in ORGANIZER_TASK_TOOL_NAMES)
 
 MAX_LISTED_DESCRIPTION = 400
+MAX_MERGED_TASKS = 20
 SEARCH_LIMIT = 8
 LIST_LIMIT = 50
 LISTED_SUMMARY_CHARS = 160
@@ -60,6 +76,8 @@ READ_OPENING_CHARS = 3_000
 
 _STATUSES = [s.value for s in TaskStatus]
 _PRIORITIES = [p.value for p in TaskPriority]
+_STATUS_RANK = {s: i for i, s in enumerate(TaskStatus)}  # backlog < todo < ... < done
+_PRIORITY_RANK = {p: i for i, p in enumerate(TaskPriority)}
 _DOC_STATUSES = [s.value for s in DocStatus]
 _DOC_KINDS = [k.value for k in DocKind]
 
@@ -103,6 +121,10 @@ def build_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             "properties": {
                 "status": {"type": "string", "enum": _STATUSES, "description": "Only tasks with this status."},
                 "include_done": {"type": "boolean", "description": "Include done tasks. Default false."},
+                "full": {
+                    "type": "boolean",
+                    "description": f"Return whole descriptions (by default they're cut at {MAX_LISTED_DESCRIPTION} characters).",
+                },
             },
         },
         annotations=ToolAnnotations(readOnlyHint=True),
@@ -115,7 +137,7 @@ def build_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             query = query.where(Task.status != TaskStatus.done)
         with Session(get_engine()) as s:
             tasks = s.exec(query.order_by(Task.status, Task.position, Task.id)).all()
-            return _ok([_task_dict(t, full=False) for t in tasks])
+            return _ok([_task_dict(t, full=bool(args.get("full"))) for t in tasks])
 
     @tool(
         "create_task",
@@ -197,6 +219,143 @@ def build_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
             return _ok(_task_dict(task))
 
     return [list_tasks, create_task, update_task]
+
+
+def build_organizer_task_tools(project_id: int) -> list[SdkMcpTool[Any]]:
+    """Tools for tidying the board: folding duplicate tasks together and ordering columns."""
+
+    @tool(
+        "merge_tasks",
+        "Fold duplicate or overlapping tasks into one. The tasks in merge_ids are deleted; keep_id stays. "
+        "Without a description, each merged task's description is appended to the kept one, so nothing is lost; "
+        "if you pass a description it replaces the kept one and must carry every detail from all of them. "
+        "Mercury notes which tasks were merged, moves their agent sessions to the kept task, and keeps the "
+        "highest priority and the furthest-along status. Done tasks, tasks with a running agent, and tasks "
+        "linked to GitHub issues can't be merged away (a GitHub-linked task can be the one you keep).",
+        {
+            "type": "object",
+            "properties": {
+                "keep_id": {"type": "integer", "description": "The task that remains."},
+                "merge_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "minItems": 1,
+                    "maxItems": MAX_MERGED_TASKS,
+                    "description": "Tasks folded into keep_id and then deleted.",
+                },
+                "title": {"type": "string", "description": "New title for the kept task."},
+                "description": {"type": "string", "description": "Consolidated description (Markdown)."},
+                "priority": {"type": "string", "enum": _PRIORITIES, "description": "Default: the highest of them."},
+            },
+            "required": ["keep_id", "merge_ids"],
+        },
+    )
+    async def merge_tasks(args: dict[str, Any]) -> dict[str, Any]:
+        keep_id = args.get("keep_id")
+        merge_ids = list(dict.fromkeys(i for i in args.get("merge_ids") or [] if isinstance(i, int)))
+        if not isinstance(keep_id, int) or not merge_ids:
+            return _error("Pass keep_id and the merge_ids to fold into it.")
+        if keep_id in merge_ids:
+            return _error("keep_id can't also be in merge_ids.")
+        if len(merge_ids) > MAX_MERGED_TASKS:
+            return _error(f"Merge at most {MAX_MERGED_TASKS} tasks at a time.")
+        with Session(get_engine()) as s:
+            tasks = {t.id: t for t in s.exec(select(Task).where(Task.id.in_([keep_id, *merge_ids]))).all()}
+            missing = [i for i in [keep_id, *merge_ids] if i not in tasks or tasks[i].project_id != project_id]
+            if missing:
+                return _error(f"Not tasks in this project: {missing}. Use list_tasks to find task ids.")
+            keep = tasks[keep_id]
+            merged = [tasks[i] for i in merge_ids]
+            if keep.status == TaskStatus.done:
+                return _error(f"T-{keep.id} is done; keep an open task instead.")
+            active = set(
+                s.exec(
+                    select(AgentRun.task_id).where(
+                        AgentRun.task_id.in_(merge_ids), AgentRun.status.in_(list(ACTIVE_RUN_STATUSES))
+                    )
+                ).all()
+            )
+            problems = []
+            for t in merged:
+                if t.status == TaskStatus.done:
+                    problems.append(f"T-{t.id} is done")
+                elif t.id in active:
+                    problems.append(f"T-{t.id} has an agent running on it")
+                elif t.github_issue_number is not None:
+                    problems.append(f"T-{t.id} is linked to GitHub issue #{t.github_issue_number} (keep it instead)")
+            if problems:
+                return _error("Nothing was merged: " + "; ".join(problems) + ".")
+
+            if "title" in args:
+                title = (args["title"] or "").strip()
+                if not title:
+                    return _error("A task needs a non-empty title.")
+                keep.title = title
+            if (args.get("description") or "").strip():
+                body = args["description"].strip()
+            else:
+                parts = [keep.description.strip()]
+                for t in merged:
+                    if t.description.strip():
+                        parts.append(f"### From T-{t.id}: {t.title}\n\n{t.description.strip()}")
+                body = "\n\n".join(p for p in parts if p)
+            note = "_Merged in: " + ", ".join(f"T-{t.id} ({t.title})" for t in merged) + "._"
+            keep.description = f"{body}\n\n{note}".strip()
+            if args.get("priority"):
+                keep.priority = TaskPriority(args["priority"])
+            else:
+                keep.priority = max([keep, *merged], key=lambda t: _PRIORITY_RANK[t.priority]).priority
+            furthest = max([keep, *merged], key=lambda t: _STATUS_RANK[t.status]).status
+            if furthest != keep.status:
+                keep.status = furthest
+                keep.position = next_position(s, project_id, furthest)
+            keep.updated_at = utcnow()
+            s.add(keep)
+            for run in s.exec(select(AgentRun).where(AgentRun.task_id.in_(merge_ids))).all():
+                run.task_id = keep.id
+                s.add(run)
+            for t in merged:
+                s.delete(t)
+            s.commit()
+            s.refresh(keep)
+            return _ok({"kept": _task_dict(keep), "deleted": merge_ids})
+
+    @tool(
+        "reorder_tasks",
+        "Set the order of tasks in one board column, top first. Tasks in the column that you leave out keep "
+        "their relative order below the ones you list.",
+        {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": _STATUSES, "description": "The column."},
+                "task_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1},
+            },
+            "required": ["status", "task_ids"],
+        },
+    )
+    async def reorder_tasks(args: dict[str, Any]) -> dict[str, Any]:
+        status = TaskStatus(args["status"])
+        order = list(dict.fromkeys(i for i in args.get("task_ids") or [] if isinstance(i, int)))
+        if not order:
+            return _error("Pass the task_ids in the order you want.")
+        with Session(get_engine()) as s:
+            column = s.exec(
+                select(Task).where(Task.project_id == project_id, Task.status == status).order_by(Task.position, Task.id)
+            ).all()
+            by_id = {t.id: t for t in column}
+            stray = [i for i in order if i not in by_id]
+            if stray:
+                return _error(f"Not in the {status.value} column: {stray}. Nothing was reordered.")
+            listed = set(order)
+            ordered = [by_id[i] for i in order] + [t for t in column if t.id not in listed]
+            for pos, t in enumerate(ordered, start=1):
+                if t.position != pos:
+                    t.position = pos
+                    s.add(t)
+            s.commit()
+            return _ok({"status": status.value, "order": [t.id for t in ordered]})
+
+    return [merge_tasks, reorder_tasks]
 
 
 def _missing_doc(doc_id: Any) -> dict[str, Any]:
@@ -720,5 +879,8 @@ def build_doc_tools(project_id: int) -> list[SdkMcpTool[Any]]:
     ]
 
 
-def build_mercury_server(project_id: int):
-    return create_sdk_mcp_server(name=SERVER_NAME, tools=build_task_tools(project_id) + build_doc_tools(project_id))
+def build_mercury_server(project_id: int, organize_board: bool = False):
+    tools = build_task_tools(project_id) + build_doc_tools(project_id)
+    if organize_board:
+        tools += build_organizer_task_tools(project_id)
+    return create_sdk_mcp_server(name=SERVER_NAME, tools=tools)

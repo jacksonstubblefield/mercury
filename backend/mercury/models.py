@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal, Optional
 
+from pydantic import field_validator
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 
@@ -49,6 +52,14 @@ class RunStatus(str, Enum):
 ACTIVE_RUN_STATUSES = {RunStatus.queued, RunStatus.running, RunStatus.waiting_approval}
 
 
+class RunPurpose(str, Enum):
+    """What a run is for. Organizer runs tidy the board or the docs and never touch the repo."""
+
+    work = "work"  # a coding session (the default)
+    organize_board = "organize_board"
+    organize_docs = "organize_docs"
+
+
 class PermissionMode(str, Enum):
     """Subset of Claude Agent SDK permission modes exposed in the UI."""
 
@@ -68,6 +79,8 @@ class ProjectBase(SQLModel):
     github_repo: Optional[str] = None  # "owner/name"
     status: ProjectStatus = ProjectStatus.active
     color: str = "#7c8cff"
+    # Preselected for new agent sessions in this project. None: the app-wide default (Preferences).
+    default_permission_mode: Optional[PermissionMode] = None
 
 
 class Project(ProjectBase, table=True):
@@ -87,6 +100,7 @@ class ProjectUpdate(SQLModel):
     github_repo: Optional[str] = None
     status: Optional[ProjectStatus] = None
     color: Optional[str] = None
+    default_permission_mode: Optional[PermissionMode] = None  # send null to use the app default
 
 
 class ProjectRead(ProjectBase):
@@ -311,8 +325,11 @@ class AgentRun(AgentRunBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True, ondelete="CASCADE")
     parent_run_id: Optional[int] = None  # follow-up of another run
+    purpose: RunPurpose = RunPurpose.work  # follow-ups keep their parent's
     status: RunStatus = RunStatus.queued
     session_id: Optional[str] = None  # Claude session id, used to resume / follow up
+    # Pasted images sent with the prompt: attachment names (see services/attachments.py).
+    images: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False, server_default="[]"))
     result: Optional[str] = None
     error: Optional[str] = None
     cost_usd: Optional[float] = None
@@ -323,12 +340,18 @@ class AgentRun(AgentRunBase, table=True):
 
 
 class AgentRunCreate(AgentRunBase):
-    pass
+    permission_mode: Optional[PermissionMode] = None  # None: the project's default, else the app's
+    images: list[str] = []  # base64 PNG/JPEG/GIF/WebP; the type is read from the bytes
+
+
+class OrganizeRequest(SQLModel):
+    target: Literal["board", "docs"]
 
 
 class AgentFollowUp(SQLModel):
     prompt: str
     permission_mode: Optional[PermissionMode] = None
+    images: list[str] = []  # base64, as in AgentRunCreate
 
 
 class PermissionModeUpdate(SQLModel):
@@ -387,3 +410,62 @@ class ClaudeUsage(SQLModel):
     plan: Optional[str] = None  # pro, max, team, ...
     windows: list[UsageWindow] = []
     fetched_at: Optional[datetime] = None
+
+
+# --------------------------------------------------------------------------- appearance
+
+_HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+_COLOR_TOKEN = re.compile(r"--[a-z0-9-]{1,40}")
+_PRESET_ID = re.compile(r"[a-z0-9-]{1,40}")
+
+
+class Appearance(SQLModel):
+    """The UI theme: a built-in preset plus the user's changes. Kept in appearance.json, not the database.
+
+    The frontend owns the token names and presets (`frontend/src/theme.ts`); the backend only checks shapes.
+    """
+
+    preset: str = "mercury-dark"
+    colors: dict[str, str] = Field(default_factory=dict)  # CSS custom property -> #rrggbb
+    font_ui: Optional[str] = Field(default=None, max_length=200)
+    font_mono: Optional[str] = Field(default=None, max_length=200)
+    radius: Optional[int] = Field(default=None, ge=0, le=16)
+
+    @field_validator("preset")
+    @classmethod
+    def _check_preset(cls, value: str) -> str:
+        if not _PRESET_ID.fullmatch(value):
+            raise ValueError("preset ids are lower-case letters, digits and dashes")
+        return value
+
+    @field_validator("colors")
+    @classmethod
+    def _check_colors(cls, colors: dict[str, str]) -> dict[str, str]:
+        if len(colors) > 64:
+            raise ValueError("too many colors")
+        for key, value in colors.items():
+            if not _COLOR_TOKEN.fullmatch(key):
+                raise ValueError(f"not a color token: {key!r}")
+            if not _HEX_COLOR.fullmatch(value):
+                raise ValueError(f"{key} must be a #rrggbb color, got {value!r}")
+        return {k: v.lower() for k, v in colors.items()}
+
+    @field_validator("font_ui", "font_mono")
+    @classmethod
+    def _check_font(cls, value: Optional[str]) -> Optional[str]:
+        # The value lands in a CSS font-family; keep it to names, commas and quotes.
+        if value is None or not value.strip():
+            return None
+        if re.search(r"[;{}<>\\]", value):
+            raise ValueError("font names can't contain ; { } < > or \\")
+        return value.strip()
+
+
+# --------------------------------------------------------------------------- preferences
+
+
+class Preferences(SQLModel):
+    """App-wide user preferences. Kept in preferences.json next to the database, like `Appearance`."""
+
+    # For new agent sessions in projects that don't set their own `default_permission_mode`.
+    default_permission_mode: PermissionMode = PermissionMode.acceptEdits

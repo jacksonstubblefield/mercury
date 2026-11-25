@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { api, openExternal } from "../api";
 import { timeAgo, useLoader, usePolling } from "../hooks";
-import { ACTIVE_STATUSES, groupSessions, plainExcerpt, sessionCost, sessionSummary, type Session } from "../sessions";
+import { ACTIVE_STATUSES, groupSessions, plainExcerpt, runLabel, sessionCost, sessionSummary, type Session } from "../sessions";
 import { TASK_COLUMNS, type Task, type TaskPriority, type TaskStatus } from "../types";
 import { Markdown } from "./Markdown";
 
@@ -147,7 +147,7 @@ function TaskSession({ session, task, onOpen }: { session: Session; task: Task; 
   const summary = sessionSummary(session);
   const active = ACTIVE_STATUSES.has(latest.status);
   // "Run agent" seeds every session with the same prompt; only show prompts the user actually wrote.
-  const opener = runs[0].prompt.startsWith(`Complete task T-${task.id}:`) ? null : runs[0].prompt;
+  const opener = runs[0].prompt.startsWith(`Complete task T-${task.id}:`) ? null : runLabel(runs[0]) || null;
   const followUps = runs.length - 1;
   const excerpt = summary.kind === "none" ? "" : plainExcerpt(summary.text);
   const truncated = summary.kind !== "none" && excerpt !== summary.text.replace(/\s+/g, " ").trim();
@@ -163,7 +163,7 @@ function TaskSession({ session, task, onOpen }: { session: Session; task: Task; 
     >
       <div className="row" style={{ fontSize: 12 }}>
         <span className={`status ${latest.status}`}>{latest.status.replace("_", " ")}</span>
-        <span className="task-session-title" title={runs[0].prompt}>
+        <span className="task-session-title" title={runLabel(runs[0])}>
           {opener ?? <span className="faint">Agent run</span>}
         </span>
         <span className="spacer" />

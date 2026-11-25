@@ -2,6 +2,14 @@ import type { AgentRun, RunStatus } from "./types";
 
 export const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set(["queued", "running", "waiting_approval"]);
 
+/** How to name a run in lists: its prompt, or its images when the user only pasted those. */
+export function runLabel(run: AgentRun): string {
+  const text = run.prompt.trim();
+  if (text) return text;
+  const n = run.images?.length ?? 0;
+  return n ? `[${n === 1 ? "image" : `${n} images`}]` : "";
+}
+
 /** A session is a run plus its chain of follow-ups (which resume the same Claude session). */
 export interface Session {
   rootId: number;

@@ -4,6 +4,7 @@ import { timeAgo, useLoader, usePolling } from "../hooks";
 import type { Doc, DocCollection, DocKind, DocListItem, DocSearchHit, DocSearchStatus, DocStatus, Project } from "../types";
 import { Markdown } from "./Markdown";
 import { MemoryImportModal } from "./MemoryImportModal";
+import { Organizer } from "./Organizer";
 
 const MAX_LISTED = 300;
 const RETIRED: DocStatus[] = ["superseded", "archived"];
@@ -17,7 +18,7 @@ const STATUS_LABELS: Record<DocStatus, string> = {
 type Selection = { kind: "doc"; id: number } | { kind: "collection"; id: number } | null;
 type GroupKey = number | "unfiled";
 
-export function DocsTab({ project }: { project: Project }) {
+export function DocsTab({ project, onOpenRun }: { project: Project; onOpenRun: (runId: number) => void }) {
   const docs = useLoader(() => api.docs(project.id), [project.id]);
   const cols = useLoader(() => api.collections(project.id), [project.id]);
   const [sel, setSel] = useState<Selection>(null);
@@ -27,6 +28,8 @@ export function DocsTab({ project }: { project: Project }) {
   const [showRetired, setShowRetired] = useState(false);
   const [importing, setImporting] = useState(false);
   const [naming, setNaming] = useState<{ parentId: number | null } | null>(null);
+  // Bumped when an organizer finishes, so the open doc or collection shows what it changed.
+  const [paneVersion, setPaneVersion] = useState(0);
 
   const allDocs = docs.data ?? [];
   const collections = cols.data ?? [];
@@ -163,6 +166,13 @@ export function DocsTab({ project }: { project: Project }) {
             Import…
           </button>
         </div>
+        <Organizer
+          project={project}
+          target="docs"
+          onChanged={reloadAll}
+          onOpenRun={onOpenRun}
+          onFinished={() => setPaneVersion((v) => v + 1)}
+        />
         {naming && (
           <NewCollection
             projectId={project.id}
@@ -242,7 +252,7 @@ export function DocsTab({ project }: { project: Project }) {
       </div>
       {sel?.kind === "doc" ? (
         <DocPane
-          key={`doc-${sel.id}`}
+          key={`doc-${sel.id}-${paneVersion}`}
           docId={sel.id}
           collections={collections}
           onSaved={onDocSaved}
@@ -254,7 +264,7 @@ export function DocsTab({ project }: { project: Project }) {
         />
       ) : selectedCollection ? (
         <CollectionPane
-          key={`col-${selectedCollection.id}`}
+          key={`col-${selectedCollection.id}-${paneVersion}`}
           collection={selectedCollection}
           collections={collections}
           docs={grouped.get(selectedCollection.id) ?? []}

@@ -314,3 +314,39 @@ def test_agent_completing_its_own_task_is_not_moved_to_review(make_client, tmp_p
     run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go", "task_id": t["id"]}).json()
     _wait_for(client, run["id"], {"succeeded"})
     assert client.get(f"/api/tasks/{t['id']}").json()["status"] == "done"
+
+
+def test_run_without_mode_uses_saved_default(make_client, tmp_path):
+    client = make_client(lambda opts: FakeClient(opts))
+    p, _ = _setup(client, tmp_path)
+
+    first = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go"}).json()
+    assert first["permission_mode"] == "acceptEdits"
+    _wait_for(client, first["id"], {"succeeded"})
+
+    client.put("/api/preferences", json={"default_permission_mode": "bypassPermissions"})
+    second = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go"}).json()
+    assert second["permission_mode"] == "bypassPermissions"
+    _wait_for(client, second["id"], {"succeeded"})
+    assert FakeClient.instances[-1].options.permission_mode == "bypassPermissions"
+
+
+def test_project_default_overrides_app_default(make_client, tmp_path):
+    client = make_client(lambda opts: FakeClient(opts))
+    p, _ = _setup(client, tmp_path)
+    client.put("/api/preferences", json={"default_permission_mode": "bypassPermissions"})
+    r = client.patch(f"/api/projects/{p['id']}", json={"default_permission_mode": "plan"})
+    assert r.json()["default_permission_mode"] == "plan"
+
+    run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go"}).json()
+    assert run["permission_mode"] == "plan"
+    _wait_for(client, run["id"], {"succeeded"})
+
+    # An explicit mode still wins, and clearing the project's default falls back to the app's.
+    run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go", "permission_mode": "default"}).json()
+    assert run["permission_mode"] == "default"
+    _wait_for(client, run["id"], {"succeeded", "waiting_approval", "failed"})
+    assert client.patch(f"/api/projects/{p['id']}", json={"default_permission_mode": None}).json()["default_permission_mode"] is None
+    run = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go"}).json()
+    assert run["permission_mode"] == "bypassPermissions"
+    _wait_for(client, run["id"], {"succeeded"})

@@ -88,15 +88,7 @@ def docs_instructions(project_id: int) -> str:
         "outside Mercury. You may read it, but never write to it; Mercury docs are your memory here.",
     ]
     if rules:
-        text, used = [], 0
-        for d in rules:
-            block = f"### {d.title} (doc {d.id})\n{d.body.strip()}"
-            if used + len(block) > MAX_RULES_CHARS:
-                text.append(f"[More rules docs, cut for length: read them with {t}list_docs kind=rules.]")
-                break
-            text.append(block)
-            used += len(block)
-        parts.append("\n## Working rules for this project (from rules docs; follow them)\n" + "\n\n".join(text))
+        parts.append(_rules_section(list(rules)))
     if pinned:
         lines = []
         for d in pinned:
@@ -122,6 +114,34 @@ def docs_instructions(project_id: int) -> str:
             lines.append(f"- Unfiled: {unfiled} docs")
         parts.append("\n## Doc collections\n" + "\n".join(lines))
     return "\n".join(parts)
+
+
+def _rules_section(rules: list[Doc]) -> str:
+    t = f"mcp__{SERVER_NAME}__"
+    text, used = [], 0
+    for d in rules:
+        block = f"### {d.title} (doc {d.id})\n{d.body.strip()}"
+        if used + len(block) > MAX_RULES_CHARS:
+            text.append(f"[More rules docs, cut for length: read them with {t}list_docs kind=rules.]")
+            break
+        text.append(block)
+        used += len(block)
+    return "\n## Working rules for this project (from rules docs; follow them)\n" + "\n\n".join(text)
+
+
+def rules_instructions(project_id: int) -> str:
+    """Just the project's rules docs, for runs that don't get the full docs instructions."""
+    with Session(get_engine()) as s:
+        rules = s.exec(
+            select(Doc)
+            .where(
+                Doc.project_id == project_id,
+                Doc.status.not_in([DocStatus.archived, DocStatus.superseded]),
+                Doc.kind == DocKind.rules,
+            )
+            .order_by(Doc.created_at)
+        ).all()
+    return _rules_section(list(rules)) if rules else ""
 
 
 # --------------------------------------------------------------------------- memory guard

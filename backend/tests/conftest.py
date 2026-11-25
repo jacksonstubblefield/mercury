@@ -12,6 +12,7 @@ from mercury.services.agent_runner import RunManager
 def make_client(tmp_path, monkeypatch):
     """Build a TestClient backed by a fresh SQLite DB and an injectable agent client."""
     monkeypatch.setenv("MERCURY_DATABASE_URL", f"sqlite:///{tmp_path / 'test.db'}")
+    monkeypatch.setenv("MERCURY_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("MERCURY_FRONTEND_DIST", str(tmp_path / "no-dist"))
     monkeypatch.setenv("MERCURY_DOC_SUMMARIES", "0")  # tests drive SummaryWorker directly, with a fake
     monkeypatch.setenv("MERCURY_EMBEDDINGS", "0")  # tests install a fake embedder where they need one

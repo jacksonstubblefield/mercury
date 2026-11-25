@@ -3,7 +3,9 @@ import { api } from "./api";
 import { usePolling, useLoader } from "./hooks";
 import { ProjectForm } from "./components/ProjectForm";
 import { ProjectView } from "./components/ProjectView";
-import { Sidebar } from "./components/Sidebar";
+import { AppearancePage } from "./components/AppearancePage";
+import { Sidebar, type Page } from "./components/Sidebar";
+import { UsagePage } from "./components/UsagePage";
 
 const LAST_PROJECT_KEY = "mercury.lastProject";
 
@@ -14,6 +16,8 @@ export default function App() {
     return saved ? Number(saved) : null;
   });
   const [creating, setCreating] = useState(false);
+  // An app page (Usage, Appearance) shown instead of the selected project.
+  const [page, setPage] = useState<Page | null>(null);
 
   // Keep run badges in the sidebar fresh.
   const reloadProjects = projects.reload;
@@ -38,14 +42,23 @@ export default function App() {
       <Sidebar
         projects={projects.data ?? []}
         selectedId={selectedId}
-        onSelect={setSelectedId}
+        onSelect={(id) => {
+          setSelectedId(id);
+          setPage(null);
+        }}
         onNew={() => setCreating(true)}
+        page={page}
+        onOpenPage={setPage}
       />
       <main className="main">
         {projects.error && !projects.data && (
           <div className="banner">Can't reach the Mercury backend: {projects.error}</div>
         )}
-        {selected ? (
+        {page === "usage" ? (
+          <UsagePage />
+        ) : page === "appearance" ? (
+          <AppearancePage />
+        ) : selected ? (
           <ProjectView key={selected.id} project={selected} onChanged={onChanged} />
         ) : (
           projects.data && (
@@ -64,6 +77,7 @@ export default function App() {
           onClose={() => setCreating(false)}
           onSaved={(p) => {
             setCreating(false);
+            setPage(null);
             void projects.reload().then(() => setSelectedId(p.id));
           }}
         />

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { Project, ProjectStatus } from "../types";
+import { MODES, modeInfo } from "../permissions";
+import type { PermissionMode, Project, ProjectStatus } from "../types";
 
 const COLORS = ["#7c8cff", "#4fd18b", "#f0b44c", "#ff6b6b", "#4cc9f0", "#c77dff", "#ff9f68", "#9aa1b2"];
 
@@ -18,8 +19,21 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
   const [githubRepo, setGithubRepo] = useState(project?.github_repo ?? "");
   const [status, setStatus] = useState<ProjectStatus>(project?.status ?? "active");
   const [color, setColor] = useState(project?.color ?? COLORS[0]);
+  const [mode, setMode] = useState<PermissionMode | null>(project?.default_permission_mode ?? null);
+  const [appMode, setAppMode] = useState<PermissionMode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .preferences()
+      .then((p) => live && setAppMode(p.default_permission_mode))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
 
   async function pickFolder() {
     const folder = await window.mercury?.pickFolder();
@@ -39,6 +53,7 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
       github_repo: githubRepo.trim() || null,
       status,
       color,
+      default_permission_mode: mode,
     };
     try {
       const saved = project ? await api.updateProject(project.id, body) : await api.createProject(body);
@@ -79,6 +94,21 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
         <label>GitHub repository (owner/name) — detected from the git remote if left blank</label>
         <input value={githubRepo} onChange={(e) => setGithubRepo(e.target.value)} placeholder="octocat/hello-world" />
 
+        <label>Default permissions for new agent sessions</label>
+        <select value={mode ?? ""} onChange={(e) => setMode((e.target.value || null) as PermissionMode | null)}>
+          <option value="">App default{appMode ? ` (${modeInfo(appMode)?.label})` : ""}</option>
+          {MODES.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+        {mode && (
+          <p className="faint" style={{ fontSize: 12, margin: "4px 0 0" }}>
+            {modeInfo(mode)?.hint}
+          </p>
+        )}
+
         <div className="row" style={{ alignItems: "flex-start", gap: 24 }}>
           <div>
             <label>Status</label>
@@ -96,7 +126,7 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
                   key={c}
                   onClick={() => setColor(c)}
                   className="dot"
-                  style={{ background: c, width: 18, height: 18, cursor: "pointer", outline: c === color ? "2px solid #fff" : "none", outlineOffset: 2 }}
+                  style={{ background: c, width: 18, height: 18, cursor: "pointer", outline: c === color ? "2px solid var(--text)" : "none", outlineOffset: 2 }}
                 />
               ))}
             </div>

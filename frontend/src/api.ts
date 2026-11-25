@@ -1,6 +1,7 @@
 import type {
   AgentEvent,
   AgentRun,
+  Appearance,
   ClaudeUsage,
   DiffKind,
   GhIssue,
@@ -15,6 +16,7 @@ import type {
   DocStatus,
   MemoryImportPreview,
   PermissionMode,
+  Preferences,
   Project,
   ProjectInput,
   ScmActionResult,
@@ -54,10 +56,16 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 const get = <T>(p: string) => request<T>("GET", p);
 const post = <T>(p: string, b?: unknown) => request<T>("POST", p, b ?? {});
 const patch = <T>(p: string, b: unknown) => request<T>("PATCH", p, b);
+const put = <T>(p: string, b: unknown) => request<T>("PUT", p, b);
 const del = (p: string) => request<void>("DELETE", p);
 
 export const api = {
   health: () => get<Health>("/api/health"),
+  appearance: () => get<Appearance>("/api/appearance"),
+  saveAppearance: (a: Appearance) => put<Appearance>("/api/appearance", a),
+  preferences: () => get<Preferences>("/api/preferences"),
+  savePreferences: (p: Preferences) => put<Preferences>("/api/preferences", p),
+
   claudeUsage: (refresh = false) => get<ClaudeUsage>(`/api/usage/claude-code${refresh ? "?refresh=true" : ""}`),
 
   projects: () => get<Project[]>("/api/projects"),
@@ -138,11 +146,22 @@ export const api = {
   runEvents: (id: number) => get<AgentEvent[]>(`/api/runs/${id}/events`),
   startRun: (
     projectId: number,
-    body: { prompt: string; task_id?: number | null; permission_mode: PermissionMode; model?: string | null; max_budget_usd?: number | null },
+    body: {
+      prompt: string;
+      task_id?: number | null;
+      permission_mode: PermissionMode;
+      model?: string | null;
+      max_budget_usd?: number | null;
+      /** base64 image data (no data: prefix) */
+      images?: string[];
+    },
   ) => post<AgentRun>(`/api/projects/${projectId}/runs`, body),
+  /** Starts an organizer run, or returns the one already organizing that target. */
+  organize: (projectId: number, target: "board" | "docs") => post<AgentRun>(`/api/projects/${projectId}/organize`, { target }),
   cancelRun: (id: number) => post<AgentRun>(`/api/runs/${id}/cancel`),
-  followUp: (id: number, prompt: string, permission_mode?: PermissionMode) =>
-    post<AgentRun>(`/api/runs/${id}/follow-up`, { prompt, permission_mode }),
+  followUp: (id: number, prompt: string, permission_mode?: PermissionMode, images?: string[]) =>
+    post<AgentRun>(`/api/runs/${id}/follow-up`, { prompt, permission_mode, images }),
+  attachmentUrl: (name: string) => `/api/attachments/${encodeURIComponent(name)}`,
   setRunMode: (id: number, permission_mode: PermissionMode) =>
     post<AgentRun>(`/api/runs/${id}/permission-mode`, { permission_mode }),
   decide: (runId: number, approvalId: string, allow: boolean, message = "") =>
