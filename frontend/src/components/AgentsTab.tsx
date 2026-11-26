@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { timeAgo, useLoader, usePolling } from "../hooks";
 import { ACTIVE_STATUSES as ACTIVE, groupSessions, runLabel, type Session } from "../sessions";
 import { taskRef } from "../refs";
@@ -18,6 +18,7 @@ import { BUILT_IN_DEFAULT_MODE, MODES, modeInfo } from "../permissions";
 import { AGENT_MODELS, BUILT_IN_DEFAULT_MODEL, modelInfo, modelLabel } from "../agentModels";
 import { Markdown } from "./Markdown";
 import { ImageStrip, MessageImages, usePastedImages } from "./PastedImages";
+import { QUESTION_TOOL, QuestionCard } from "./QuestionCard";
 import { ChangesPanel, EditCard, FilesContext, type FileEdit, fileEditsFrom, isEditTool, pathKey } from "./SessionChanges";
 
 function ModeSelect({
@@ -151,6 +152,13 @@ export function AgentsTab({ project, initialTask, onConsumeInitialTask, focus, o
   const anyActive = (runs.data ?? []).some((r) => ACTIVE.has(r.status));
   usePolling(runs.reload, 3000, anyActive);
 
+  // Runs move their task along the board, including ones that finish while another session is open.
+  const runStates = (runs.data ?? []).map((r) => `${r.id}:${r.status}`).join();
+  const reloadTasks = tasks.reload;
+  useEffect(() => {
+    if (runStates) void reloadTasks();
+  }, [runStates, reloadTasks]);
+
   // A later focus request (e.g. a sidebar click while this tab is open) switches sessions. The run may be
   // newer than our list, so reload once if it's missing.
   const handledFocus = useRef(focus?.nonce ?? null);
@@ -275,12 +283,17 @@ export function AgentsTab({ project, initialTask, onConsumeInitialTask, focus, o
           key={current.rootId}
           project={project}
           session={current}
-          taskLabel={current.latest.task_id != null ? taskRefs.get(current.latest.task_id) : undefined}
+          task={tasks.data?.find((t) => t.id === current.latest.task_id)}
           openAt={view?.kind === "session" && view.fresh ? "bottom" : openScroll}
           jump={jump}
           onSent={(run) => {
             setJump(null);
             addRun(run);
+          }}
+          onTaskSaved={(task) => {
+            tasks.setData((prev) => prev?.map((t) => (t.id === task.id ? task : t)));
+            void tasks.reload();
+            onChanged();
           }}
           onChanged={refresh}
         />
@@ -310,7 +323,7 @@ function SessionItem({
   return (
     <div className={`run-item ${selected ? "active" : ""}`} onClick={onSelect}>
       <div className="prompt">{runLabel(runs[0])}</div>
-      <div className="row" style={{ fontSize: 12 }}>
+      <div className="row run-item-meta">
         <span className={`status ${latest.status}`}>{latest.status.replace("_", " ")}</span>
         {taskLabel && <span className="faint">{taskLabel}</span>}
         {runs.length > 1 && <span className="faint">{runs.length} messages</span>}
@@ -459,14 +472,20 @@ function NewSession({
     <div className="run-view new-session">
       <div className="new-session-inner">
         <h2>New session</h2>
-        <p className="faint">Claude works directly in {project.repo_path ?? "the project's repo"}.</p>
+        <p className="faint">
+          {project.scratch
+            ? `No project needed. Claude works in the scratch folder, ${project.repo_path}, which all scratch sessions share.`
+            : `Claude works directly in ${project.repo_path ?? "the project's repo"}.`}
+        </p>
         {!project.repo_path && <p className="error-text">Set a local repo folder in project Settings first.</p>}
         <textarea
           autoFocus
           rows={5}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="What should Claude do? e.g. “Add a /health endpoint and a test for it.” Paste or drop screenshots here too."
+          placeholder={`What should Claude do? e.g. “${
+            project.scratch ? "Write a script that renames my photos by date." : "Add a /health endpoint and a test for it."
+          }” Paste or drop screenshots here too.`}
           onKeyDown={(e) => {
             if (isSendKey(e)) {
               e.preventDefault();
@@ -551,7 +570,8 @@ function NewSession({
 
 // ------------------------------------------------------------------------- session view
 
-type Follow = { mode: "bottom" } | { mode: "free" } | { mode: "anchor"; runId: number };
+/** `newest`: anchor to the turn's latest message from the user, not the one that started it. */
+type Follow = { mode: "bottom" } | { mode: "free" } | { mode: "anchor"; runId: number; newest?: boolean };
 const NEAR_BOTTOM_PX = 40;
 
 const PANEL_KEY = "mercury.changesPanel";
@@ -567,19 +587,22 @@ function readPanelOpen(): boolean {
 function SessionView({
   project,
   session,
-  taskLabel,
+  task,
   openAt,
   jump,
   onSent,
+  onTaskSaved,
   onChanged,
 }: {
   project: Project;
   session: Session;
-  taskLabel?: string;
+  /** The linked task, if it still exists. */
+  task?: Task;
   /** Where the conversation starts when it opens; a `jump` overrides it. Read once, on mount. */
   openAt: SessionOpenScroll;
   jump: Jump | null;
   onSent: (run: AgentRun) => void;
+  onTaskSaved: (task: Task) => void;
   onChanged: () => void;
 }) {
   // Live run state from each turn's stream; fresher than the polled list.
@@ -635,14 +658,18 @@ function SessionView({
     openAt === "top"
       ? { mode: "free" }
       : openAt === "last_message"
-        ? { mode: "anchor", runId: session.runs[session.runs.length - 1].id }
+        ? { mode: "anchor", runId: session.runs[session.runs.length - 1].id, newest: true }
         : { mode: "bottom" },
   );
   const [atBottom, setAtBottom] = useState(openAt === "bottom");
   const [flash, setFlash] = useState<number | null>(null);
 
-  const messageTop = (runId: number) => {
-    const target = document.getElementById(`msg-${runId}`);
+  const messageTop = (runId: number, newest = false) => {
+    let target = document.getElementById(`msg-${runId}`);
+    if (newest) {
+      const sent = target?.parentElement?.querySelectorAll<HTMLElement>(".msg-user");
+      if (sent?.length) target = sent[sent.length - 1];
+    }
     return target ? target.offsetTop - 12 : null;
   };
 
@@ -652,7 +679,7 @@ function SessionView({
     if (!el) return;
     if (f.mode === "bottom") el.scrollTop = el.scrollHeight;
     else if (f.mode === "anchor") {
-      const top = messageTop(f.runId);
+      const top = messageTop(f.runId, f.newest);
       if (top !== null) el.scrollTop = top;
     }
   }, []);
@@ -717,21 +744,51 @@ function SessionView({
   const [actionError, setActionError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const pasted = usePastedImages();
+  const addImages = pasted.add;
+  const composer = useRef<HTMLTextAreaElement>(null);
   const shownMode = active ? latest.permission_mode : nextMode ?? latest.permission_mode;
   // Runs from before models could be chosen have none recorded; they ran on Opus 5.5.
   const sessionModel = latest.model ?? BUILT_IN_DEFAULT_MODEL;
   const shownModel = active ? sessionModel : nextModel ?? sessionModel;
-  const canSend = !active && !!resumeFrom && (!!text.trim() || pasted.images.length > 0) && !sending;
+  // While the agent works, messages are queued for it (organizer runs don't take any).
+  const canQueue = active && latest.purpose === "work";
+  const canSend = (active ? canQueue : !!resumeFrom) && (!!text.trim() || pasted.images.length > 0) && !sending;
+
+  function clearComposer(sent: string) {
+    setText((now) => (now === sent ? "" : now)); // keep anything typed while it was sending
+    pasted.clear();
+    follow.current = { mode: "bottom" };
+    applyFollow(); // a queued message may already be in the transcript
+  }
+
+  /** Queue the message for the working run. False if the run ended first, with `ended` updated to match. */
+  async function queue(): Promise<{ queued: true } | { queued: false; ended: AgentRun }> {
+    try {
+      await api.sendMessage(latest.id, text, pasted.payload);
+      return { queued: true };
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 409)) throw e;
+      const ended = await api.run(latest.id);
+      if (ACTIVE.has(ended.status)) throw e;
+      onRun(ended);
+      return { queued: false, ended };
+    }
+  }
 
   async function send() {
-    if (!canSend || !resumeFrom) return;
+    if (!canSend) return;
     setActionError(null);
     setSending(true);
     try {
-      const run = await api.followUp(resumeFrom.id, text, shownMode, pasted.payload, nextModel);
-      setText("");
-      pasted.clear();
-      follow.current = { mode: "bottom" };
+      let from = resumeFrom;
+      if (active) {
+        const outcome = await queue();
+        if (outcome.queued) return clearComposer(text);
+        if (outcome.ended.session_id) from = outcome.ended; // too late to queue: send it as a follow-up
+      }
+      if (!from) throw new Error("This session never started, so it can't be continued.");
+      const run = await api.followUp(from.id, text, shownMode, pasted.payload, nextModel);
+      clearComposer(text);
       onSent(run);
     } catch (e) {
       setActionError(errorText(e));
@@ -750,6 +807,29 @@ function SessionView({
     }
   }
 
+  /** Put a message the agent never read back in the composer, to send again. */
+  const restore = useCallback(
+    async (prompt: string, images: string[]) => {
+      setActionError(null);
+      setText((now) => [now.trim(), prompt].filter(Boolean).join("\n\n"));
+      composer.current?.focus();
+      try {
+        const files = await Promise.all(
+          images.map(async (name) => {
+            const res = await fetch(api.attachmentUrl(name));
+            if (!res.ok) throw new Error(res.statusText);
+            const blob = await res.blob();
+            return new File([blob], name, { type: blob.type });
+          }),
+        );
+        await addImages(files);
+      } catch (e) {
+        setActionError(`Couldn't attach the message's pictures again: ${errorText(e)}`);
+      }
+    },
+    [addImages],
+  );
+
   async function stop() {
     setActionError(null);
     try {
@@ -759,26 +839,64 @@ function SessionView({
     }
   }
 
+  // ---- the linked task: once a run has succeeded, the user can sign it off from here
+  const [finishing, setFinishing] = useState(false);
+  const canFinishTask = latest.status === "succeeded" && !!task && task.status !== "done";
+
+  async function finishTask() {
+    if (!task) return;
+    setActionError(null);
+    setFinishing(true);
+    try {
+      onTaskSaved(await api.updateTask(task.id, { status: "done" }));
+    } catch (e) {
+      setActionError(`Couldn't move the task to Done: ${errorText(e)}`);
+    } finally {
+      setFinishing(false);
+    }
+  }
+
   return (
     <FilesContext.Provider value={files}>
     <div className={`session-layout ${panelOpen ? "with-changes" : ""}`}>
     <div className="run-view">
-      <div className="run-head row">
-        <span className={`status ${latest.status}`}>{latest.status.replace("_", " ")}</span>
-        <span className="session-title" title={runLabel(runs[0])}>
-          {runLabel(runs[0])}
-        </span>
-        <span className="spacer" />
-        {taskLabel && <span className="faint">{taskLabel}</span>}
-        {turns > 0 && <span className="faint">· {turns} turns</span>}
-        {cost > 0 && <span className="faint">· ${cost.toFixed(4)}</span>}
-        <button
-          className={`btn small ${panelOpen ? "active" : ""}`}
-          onClick={() => setPanelOpen(!panelOpen)}
-          title={panelOpen ? "Hide the files changed in this session" : "Show the files changed in this session"}
-        >
-          Files changed{fileCount > 0 ? ` · ${fileCount}` : ""}
-        </button>
+      {/* When there isn't room for both, the details and buttons drop to a second line. */}
+      <div className="run-head">
+        <div className="run-head-name">
+          <span className={`status ${latest.status}`}>{latest.status.replace("_", " ")}</span>
+          <span className="session-title" title={runLabel(runs[0])}>
+            {runLabel(runs[0])}
+          </span>
+        </div>
+        <div className="run-head-details faint">
+          {task && (
+            <span>
+              {taskRef(project.key, task)}
+              {task.status === "done" && " · done"}
+            </span>
+          )}
+          {turns > 0 && <span className="run-head-stat">· {turns} turns</span>}
+          {cost > 0 && <span className="run-head-stat">· ${cost.toFixed(4)}</span>}
+        </div>
+        <div className="run-head-actions">
+          {canFinishTask && (
+            <button
+              className="btn primary small"
+              disabled={finishing}
+              onClick={() => void finishTask()}
+              title={`Move ${taskRef(project.key, task)} to Done: ${task.title}`}
+            >
+              Mark Task as Done
+            </button>
+          )}
+          <button
+            className={`btn small ${panelOpen ? "active" : ""}`}
+            onClick={() => setPanelOpen(!panelOpen)}
+            title={panelOpen ? "Hide the files changed in this session" : "Show the files changed in this session"}
+          >
+            Files changed{fileCount > 0 ? ` · ${fileCount}` : ""}
+          </button>
+        </div>
       </div>
 
       <div className="transcript-wrap">
@@ -802,6 +920,7 @@ function SessionView({
                 onRun={onRun}
                 onEdits={onEdits}
                 onTasksChanged={onChanged}
+                onRestore={resumeFrom || active ? restore : undefined}
               />
             ))}
           </div>
@@ -822,11 +941,14 @@ function SessionView({
           </p>
         )}
         <textarea
+          ref={composer}
           rows={2}
           value={text}
           onChange={(e) => setText(e.target.value)}
           disabled={!active && !resumeFrom}
-          placeholder={active ? "Claude is working… you can type your next message." : "Reply to Claude…"}
+          placeholder={
+            canQueue ? "Queue another message…" : active ? "Claude is working… you can type your next message." : "Reply to Claude…"
+          }
           onKeyDown={(e) => {
             if (isSendKey(e)) {
               e.preventDefault();
@@ -836,7 +958,7 @@ function SessionView({
           {...pasted.handlers}
         />
         <ImageStrip images={pasted.images} onRemove={pasted.remove} />
-        <div className="row">
+        <div className="row composer-row">
           <ModelSelect
             className="small"
             value={shownModel}
@@ -861,11 +983,16 @@ function SessionView({
           {latest.status === "waiting_approval" ? (
             <span className="composer-status faint">
               <a href="#" onClick={(e) => (e.preventDefault(), scrollToLatest())}>
-                Waiting for your approval ↓
+                Waiting for you ↓
               </a>
             </span>
           ) : active ? (
-            <span className="composer-status faint">Working…</span>
+            <span
+              className="composer-status faint"
+              title={canQueue ? "Claude reads queued messages as soon as it can, without stopping what it's doing." : undefined}
+            >
+              Working…
+            </span>
           ) : (
             <span
               className="composer-status composer-hint faint"
@@ -874,16 +1001,23 @@ function SessionView({
               Enter to send · Shift+Enter for a new line · Paste screenshots
             </span>
           )}
-          <span className="spacer" />
-          {active ? (
-            <button className="btn small danger" onClick={() => void stop()}>
-              ■ Stop
-            </button>
-          ) : (
-            <button className="btn primary small" disabled={!canSend} onClick={() => void send()}>
-              Send
-            </button>
-          )}
+          <div className="composer-actions">
+            {active && (
+              <button className="btn small danger" onClick={() => void stop()}>
+                ■ Stop
+              </button>
+            )}
+            {(!active || canQueue) && (
+              <button
+                className="btn primary small"
+                disabled={!canSend}
+                onClick={() => void send()}
+                title={active ? "Claude reads it as soon as it can, without stopping what it's doing" : undefined}
+              >
+                {active ? "Queue" : "Send"}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -974,6 +1108,7 @@ function Turn({
   onRun,
   onEdits,
   onTasksChanged,
+  onRestore,
 }: {
   run: AgentRun;
   first: boolean;
@@ -981,6 +1116,8 @@ function Turn({
   onRun: (run: AgentRun) => void;
   onEdits: (runId: number, edits: FileEdit[]) => void;
   onTasksChanged: () => void;
+  /** Absent when the session can't take another message. */
+  onRestore?: (prompt: string, images: string[]) => void;
 }) {
   const { events, connError, live } = useRunEvents(run, onRun);
 
@@ -995,6 +1132,12 @@ function Turn({
   const results = new Map(events.filter((e) => e.kind === "tool_result").map((e) => [e.payload.tool_use_id, e.payload]));
   const hasText = events.some((e) => e.kind === "text");
   const active = ACTIVE.has(run.status);
+  const asking = events.some(
+    (e) => e.kind === "approval_request" && e.payload.tool_name === QUESTION_TOOL && !decided.has(e.payload.approval_id),
+  );
+  // Messages sent during this run that the agent hasn't read (or, once it's over, never did).
+  const read = new Set(events.filter((e) => e.kind === "user_message").map((e) => e.payload.message_id));
+  const unread = events.filter((e) => e.kind === "queued_message" && !read.has(e.payload.message_id));
 
   // The agent edited Mercury tasks while we watched: refresh task lists.
   const taskToolIds = new Set(events.filter((e) => e.kind === "tool_use" && isTaskTool(e.payload.name)).map((e) => e.payload.id));
@@ -1007,24 +1150,75 @@ function Turn({
 
   return (
     <div className="turn">
-      <div id={`msg-${run.id}`} className={`msg-user ${flash ? "flash" : ""}`}>
-        <MessageImages names={run.images ?? []} />
-        {run.prompt.trim() && <div className="msg-text">{run.prompt}</div>}
-        <div className="msg-meta">
-          {run.model && `${modelLabel(run.model)} · `}
-          {modeInfo(run.permission_mode)?.label} · {timeAgo(run.created_at)}
-        </div>
-      </div>
+      <UserMessage id={`msg-${run.id}`} className={flash ? "flash" : ""} prompt={run.prompt} images={run.images ?? []}>
+        {run.model && `${modelLabel(run.model)} · `}
+        {modeInfo(run.permission_mode)?.label} · {timeAgo(run.created_at)}
+      </UserMessage>
       {events.map((e) => (
-        <EventItem key={e.seq} event={e} runId={run.id} decided={decided} results={results} first={first} hasText={hasText} />
+        <EventItem
+          key={e.seq}
+          event={e}
+          runId={run.id}
+          active={active}
+          decided={decided}
+          results={results}
+          first={first}
+          hasText={hasText}
+        />
       ))}
       {active && (
         <div className="ev-working">
           <span className="pulse" />
-          {run.status === "waiting_approval" ? "Waiting for your approval" : run.status === "queued" ? "Starting…" : "Working…"}
+          {run.status === "waiting_approval"
+            ? `Waiting for your ${asking ? "answer" : "approval"}`
+            : run.status === "queued"
+              ? "Starting…"
+              : "Working…"}
         </div>
       )}
+      {unread.map((e) => (
+        <UserMessage key={e.seq} className="unread" prompt={e.payload.prompt} images={e.payload.images}>
+          {active ? (
+            "Queued · Claude hasn't read it yet"
+          ) : (
+            <>
+              Not sent · the run ended before Claude read it
+              {onRestore && (
+                <>
+                  {" · "}
+                  <button className="link-btn" onClick={() => onRestore(e.payload.prompt, e.payload.images)}>
+                    Put back in the message box
+                  </button>
+                </>
+              )}
+            </>
+          )}
+        </UserMessage>
+      ))}
       {connError && <p className="error-text">{connError}</p>}
+    </div>
+  );
+}
+
+/** Something the user said: its pictures and text, with a line of details under them. */
+function UserMessage({
+  id,
+  className = "",
+  prompt,
+  images,
+  children,
+}: {
+  id?: string;
+  className?: string;
+  prompt: string;
+  images: string[];
+  children: React.ReactNode;
+}) {
+  return (
+    <div id={id} className={`msg-user ${className}`}>
+      <MessageImages names={images} />
+      {prompt.trim() && <div className="msg-text">{prompt}</div>}
+      <div className="msg-meta">{children}</div>
     </div>
   );
 }
@@ -1032,6 +1226,7 @@ function Turn({
 function EventItem({
   event,
   runId,
+  active,
   decided,
   results,
   first,
@@ -1039,6 +1234,7 @@ function EventItem({
 }: {
   event: AgentEvent;
   runId: number;
+  active: boolean; // the turn is still going
   decided: Set<string>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   results: Map<string, Record<string, any>>;
@@ -1050,6 +1246,14 @@ function EventItem({
     case "system":
       // Every turn re-initialises the same session; only the first is worth showing.
       return first ? <div className="ev-system">Session started · {p.model} · {p.cwd}</div> : null;
+    case "user_message":
+      return (
+        <UserMessage prompt={p.prompt} images={p.images}>
+          Sent while Claude was working
+        </UserMessage>
+      );
+    case "queued_message":
+      return null; // until it's read, Turn shows it below the latest output
     case "text":
       return (
         <div className="ev-text">
@@ -1059,6 +1263,8 @@ function EventItem({
     case "thinking":
       return <div className="ev-thinking">{p.text}</div>;
     case "tool_use": {
+      // The question card (then its answers, or "dismissed") stands in for this call.
+      if (p.name === QUESTION_TOOL) return null;
       const result = results.get(p.id);
       if (isEditTool(p.name)) return <EditCard name={p.name} input={p.input} result={result} />;
       return (
@@ -1082,6 +1288,11 @@ function EventItem({
       return null; // rendered inside its tool_use
     case "approval_request": {
       const pending = !decided.has(p.approval_id);
+      if (p.tool_name === QUESTION_TOOL) {
+        if (!pending) return null; // the decision below shows the outcome
+        if (!active) return <div className="ev-system">Question not answered · the run ended first</div>;
+        return <QuestionCard runId={runId} approvalId={p.approval_id} input={p.input} />;
+      }
       return (
         <div className="ev-approval">
           <div>
@@ -1114,6 +1325,21 @@ function EventItem({
       );
     }
     case "approval_decision":
+      if (p.answers) {
+        return (
+          <div className="ev-answers">
+            {Object.entries(p.answers as Record<string, string>).map(([question, answer]) => (
+              <div key={question}>
+                <div className="faint">{question}</div>
+                <div>{answer}</div>
+              </div>
+            ))}
+          </div>
+        );
+      }
+      if (p.tool_name === QUESTION_TOOL && !p.allow) {
+        return <div className="ev-system">Question dismissed{p.message ? `: ${p.message}` : ""}</div>;
+      }
       return <div className="ev-system">{p.allow ? "✓ Allowed" : `✗ Denied${p.message ? `: ${p.message}` : ""}`}</div>;
     case "result": {
       // cost_usd is this run's share; older events only have the session's running total.

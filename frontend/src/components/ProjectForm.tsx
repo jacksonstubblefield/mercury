@@ -15,6 +15,8 @@ interface Props {
 }
 
 export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
+  // The built-in Scratch project has no name, status or GitHub repo to edit, and can't be deleted.
+  const scratch = !!project?.scratch;
   const [name, setName] = useState(project?.name ?? "");
   const [key, setKey] = useState(project?.key ?? "");
   const [suggestedKey, setSuggestedKey] = useState("");
@@ -100,12 +102,19 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal">
-        <h2>{project ? "Project settings" : "New project"}</h2>
+        <h2>{scratch ? "Scratch settings" : project ? "Project settings" : "New project"}</h2>
 
         <div className="row" style={{ alignItems: "flex-start" }}>
           <div style={{ flex: 1 }}>
             <label>Name</label>
-            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Mercury" />
+            <input
+              autoFocus={!scratch}
+              disabled={scratch}
+              title={scratch ? "Scratch is built in, so its name is fixed." : undefined}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Mercury"
+            />
           </div>
           <div style={{ width: 110 }}>
             <label title="2-4 letters or digits, starting with a letter. Task and doc ids start with it: MER-12, MER-D3.">
@@ -135,18 +144,31 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
         <label>Description</label>
         <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What is this project? (Markdown)" />
 
-        <label>Local repository folder — where agents do their work</label>
+        <label>{scratch ? "Scratch folder" : "Local repository folder"} — where agents do their work</label>
         <div className="row">
-          <input value={repoPath} onChange={(e) => setRepoPath(e.target.value)} placeholder="C:\src\my-project" />
+          <input
+            value={repoPath}
+            onChange={(e) => setRepoPath(e.target.value)}
+            placeholder={scratch ? "Leave blank for Mercury's own scratch folder" : "C:\\src\\my-project"}
+          />
           {window.mercury && (
             <button className="btn" onClick={pickFolder}>
               Browse…
             </button>
           )}
         </div>
+        {scratch && repoPath.trim() !== (project?.repo_path ?? "") && (
+          <p className="faint" style={{ fontSize: 12, margin: "4px 0 0" }}>
+            Earlier scratch sessions ran in the old folder, so follow-ups to them may not be able to continue.
+          </p>
+        )}
 
-        <label>GitHub repository (owner/name) — detected from the git remote if left blank</label>
-        <input value={githubRepo} onChange={(e) => setGithubRepo(e.target.value)} placeholder="octocat/hello-world" />
+        {!scratch && (
+          <>
+            <label>GitHub repository (owner/name) — detected from the git remote if left blank</label>
+            <input value={githubRepo} onChange={(e) => setGithubRepo(e.target.value)} placeholder="octocat/hello-world" />
+          </>
+        )}
 
         <label>Default model for new agent sessions</label>
         <select value={model ?? ""} onChange={(e) => setModel((e.target.value || null) as AgentModel | null)}>
@@ -179,14 +201,16 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
         )}
 
         <div className="row" style={{ alignItems: "flex-start", gap: 24 }}>
-          <div>
-            <label>Status</label>
-            <select value={status} onChange={(e) => setStatus(e.target.value as ProjectStatus)} style={{ width: 140 }}>
-              <option value="active">Active</option>
-              <option value="paused">Paused</option>
-              <option value="archived">Archived</option>
-            </select>
-          </div>
+          {!scratch && (
+            <div>
+              <label>Status</label>
+              <select value={status} onChange={(e) => setStatus(e.target.value as ProjectStatus)} style={{ width: 140 }}>
+                <option value="active">Active</option>
+                <option value="paused">Paused</option>
+                <option value="archived">Archived</option>
+              </select>
+            </div>
+          )}
           <div>
             <label>Color</label>
             <div className="row" style={{ height: 36 }}>
@@ -205,7 +229,7 @@ export function ProjectForm({ project, onClose, onSaved, onDeleted }: Props) {
         {error && <p className="error-text">{error}</p>}
 
         <div className="modal-actions">
-          {project && (
+          {project && !scratch && (
             <button className="btn danger" onClick={remove}>
               Delete project
             </button>

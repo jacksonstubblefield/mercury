@@ -10,6 +10,7 @@ import { Sidebar, type Page } from "./components/Sidebar";
 import { UsageGauge } from "./components/UsageGauge";
 import { UsagePage } from "./components/UsagePage";
 import { useAgentNotifications } from "./notifications";
+import { useClaudeUsage } from "./usage";
 
 const LAST_PROJECT_KEY = "mercury.lastProject";
 
@@ -32,6 +33,7 @@ export default function App() {
   const reloadAttention = attention.reload;
   usePolling(reloadAttention, 3000);
   useAgentNotifications(attention.data, projects.data);
+  const usage = useClaudeUsage();
 
   // A session to open in its project's Agents tab (from the sidebar or a notification).
   const [openSession, setOpenSession] = useState<(FocusRequest & { projectId: number }) | null>(null);
@@ -46,8 +48,8 @@ export default function App() {
   useEffect(() => {
     const list = projects.data;
     if (!list) return;
-    if (list.length === 0) setSelectedId(null);
-    else if (selectedId === null || !list.some((p) => p.id === selectedId)) setSelectedId(list[0].id);
+    // With nothing chosen, open the user's first project; Scratch only when they pick it (else the welcome page).
+    if (selectedId === null || !list.some((p) => p.id === selectedId)) setSelectedId(list.find((p) => !p.scratch)?.id ?? null);
   }, [projects.data, selectedId]);
 
   useEffect(() => {
@@ -55,6 +57,7 @@ export default function App() {
   }, [selectedId]);
 
   const selected = projects.data?.find((p) => p.id === selectedId) ?? null;
+  const scratch = projects.data?.find((p) => p.scratch);
   const onChanged = useCallback(() => {
     void reloadProjects();
     void reloadAttention();
@@ -77,12 +80,12 @@ export default function App() {
         onOpenSession={(s) => openRun(s.project_id, s.run_id)}
       />
       <main className="main">
-        <UsageGauge onOpen={() => setPage("usage")} />
+        <UsageGauge usage={usage} onOpen={() => setPage("usage")} />
         {projects.error && !projects.data && (
           <div className="banner">Can't reach the Mercury backend: {projects.error}</div>
         )}
         {page === "usage" ? (
-          <UsagePage />
+          <UsagePage usage={usage} />
         ) : page === "appearance" ? (
           <AppearancePage />
         ) : page === "settings" ? (
@@ -102,6 +105,13 @@ export default function App() {
               <button className="btn primary" onClick={() => setCreating(true)}>
                 Create your first project
               </button>
+              {scratch && (
+                <p>
+                  <button className="link-btn" onClick={() => setSelectedId(scratch.id)}>
+                    Or start a session in Scratch, without a project
+                  </button>
+                </p>
+              )}
             </div>
           )
         )}

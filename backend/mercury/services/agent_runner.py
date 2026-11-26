@@ -2,7 +2,13 @@
 
 Each run is an asyncio task. Everything the agent does is stored as an
 AgentEvent row and pushed to any WebSocket subscribers. Tool calls that need
-permission pause the run and surface an approval request in the UI.
+permission pause the run and surface an approval request in the UI. So does
+a question for the user (the AskUserQuestion tool), in every permission mode.
+
+The user can send more messages while a work run is going (``send_message``).
+They go straight to the Claude CLI, which takes each one in after the current
+tool call, or starts another turn for it if the current one ends first. So one
+run can span several turns, each with its own result.
 """
 
 from __future__ import annotations
@@ -12,8 +18,8 @@ import json
 import logging
 import uuid
 import warnings
-from dataclasses import dataclass
-from typing import Any, Callable
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Callable
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -47,8 +53,8 @@ from ..models import (
     TaskStatus,
     utcnow,
 )
-from . import attachments, organizer, refs
-from .agent_memory import docs_instructions, memory_hooks
+from . import attachments, claude_usage, organizer, refs, scratch
+from .agent_memory import docs_instructions, memory_hooks, scratch_docs_instructions
 from .mercury_tools import ORGANIZER_TASK_TOOLS, SETTINGS_TOOLS
 from .mercury_tools import PREAPPROVED_TOOL_NAMES as MERCURY_TOOLS
 from .mercury_tools import SERVER_NAME as MERCURY_SERVER
@@ -57,9 +63,18 @@ from .mercury_tools import build_mercury_server, precheck
 log = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 20_000
+# The most the SDK will read as one line from the CLI. Its 1 MB default is too small for the CLI's echo
+# of a message with several images (each is some hundreds of KB even after the CLI shrinks it).
+MAX_CLI_LINE_BYTES = 64 * 1024 * 1024
+# After a turn ends with queued messages still waiting, how long to wait for the CLI to start on them.
+NEXT_TURN_TIMEOUT = 30.0
 
 # Tools that acceptEdits mode auto-approves; used when switching modes mid-run.
 EDIT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
+
+# The CLI's tool for asking the user multiple-choice questions. It reaches can_use_tool even in Full auto,
+# and the answers go back inside the tool's input: allowing it unchanged tells the agent nobody answered.
+QUESTION_TOOL = "AskUserQuestion"
 
 # Mercury's own task and doc tools (except delete_doc) are pre-approved in every mode
 # via allowed_tools, which (intentionally) bypasses can_use_tool for them; don't warn about that.
@@ -78,6 +93,27 @@ class _PendingApproval:
     run_id: int
     future: asyncio.Future
     tool_name: str = ""
+
+
+@dataclass
+class _QueuedMessage:
+    prompt: str
+    images: list[str]
+    written: bool = False  # handed to the Claude CLI
+
+
+@dataclass
+class _Inbox:
+    """Messages the user sends to a run while it works, until the agent takes them in."""
+
+    queued: dict[str, _QueuedMessage] = field(default_factory=dict)  # message uuid -> message, oldest first
+    client: Any = None  # set once the run's own prompt has gone out
+    closed: bool = False  # the run is ending, so it takes no more messages
+    writing: asyncio.Lock = field(default_factory=asyncio.Lock)  # keeps messages in order
+
+    def payload(self, message_id: str) -> dict:
+        message = self.queued[message_id]
+        return {"message_id": message_id, "prompt": message.prompt, "images": message.images}
 
 
 def _truncate(text: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
@@ -164,16 +200,36 @@ def serialize_message(message: Any) -> list[tuple[str, dict]]:
     return events
 
 
-def prompt_input(prompt: str, images: list[str]) -> Any:
-    """What to pass to ``client.query``: the plain prompt, or a user message with image blocks."""
-    if not images:
+def prompt_input(prompt: str, images: list[str], message_id: str | None = None) -> Any:
+    """What to pass to ``client.query``: the plain prompt, or a user message dict.
+
+    Images need the dict form. So does a message sent mid-run (``message_id``): the CLI reports that
+    uuid back when the agent takes the message in.
+    """
+    if not images and message_id is None:
         return prompt
-    content = attachments.content_blocks(prompt, images)  # read now, so a missing file fails the run up front
+    # read now, so a missing file fails the run up front
+    content = attachments.content_blocks(prompt, images) if images else prompt
+    message = {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
+    if message_id is not None:
+        message |= {"uuid": message_id, "origin": {"kind": "human"}}  # from the user, not an automated source
 
     async def messages():
-        yield {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
+        yield message
 
     return messages()
+
+
+async def _turn(client: Any, start_within: float | None) -> AsyncIterator[Any]:
+    """One turn's messages, up to its result. With ``start_within``, none if the turn doesn't start in time."""
+    messages = client.receive_response().__aiter__()
+    if start_within is not None:
+        try:
+            yield await asyncio.wait_for(messages.__anext__(), start_within)
+        except (asyncio.TimeoutError, StopAsyncIteration):
+            return
+    async for message in messages:
+        yield message
 
 
 def build_system_append(project: Project, task: Task | None) -> str:
@@ -181,6 +237,13 @@ def build_system_append(project: Project, task: Task | None) -> str:
         "You are running inside Mercury, the user's project manager and coding workspace.",
         f"Project: {project.name}",
     ]
+    if project.scratch:
+        lines.append(
+            "This is a scratch session: it doesn't belong to any of the user's projects, and may be about anything. "
+            f"Your working folder ({project.repo_path}) is a scratch space rather than a project's codebase. All "
+            "scratch sessions share it, so don't change or delete files this session didn't create unless the user "
+            "asks. The board and docs described below are Scratch's own."
+        )
     if project.description:
         lines.append(f"Project description: {project.description}")
     if project.github_repo:
@@ -221,7 +284,8 @@ def build_system_append(project: Project, task: Task | None) -> str:
         "corners with set_appearance."
     )
     if project.id is not None:
-        lines.append("\n" + docs_instructions(project.id))
+        docs = scratch_docs_instructions if project.scratch else docs_instructions
+        lines.append("\n" + docs(project.id))
     return "\n".join(lines)
 
 
@@ -240,6 +304,8 @@ class RunManager:
         self._approvals: dict[str, _PendingApproval] = {}
         self._seq: dict[int, int] = {}
         self._modes: dict[int, PermissionMode] = {}  # live permission mode of active runs
+        self._inboxes: dict[int, _Inbox] = {}
+        self._background: set[asyncio.Task] = set()  # work that outlives the run that started it
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -255,6 +321,7 @@ class RunManager:
             s.commit()
 
     def start(self, run_id: int) -> None:
+        self._inboxes[run_id] = _Inbox()  # now, so messages can be queued while the run is still starting
         self._tasks[run_id] = asyncio.create_task(self._execute(run_id), name=f"agent-run-{run_id}")
 
     def pending_tool(self, run_id: int) -> str | None:
@@ -269,14 +336,36 @@ class RunManager:
         task = self._tasks.get(run_id)
         if task is None or task.done():
             return False
+        inbox = self._inboxes.get(run_id)
+        queued = bool(inbox and inbox.queued)
+        if inbox is not None:
+            inbox.closed = True
         client = self._clients.get(run_id)
         if client is not None:
-            try:
-                await asyncio.wait_for(client.interrupt(), timeout=5)
-            except Exception:  # interrupt is best-effort; cancellation below is authoritative
-                log.debug("interrupt failed for run %s", run_id, exc_info=True)
+            await self._interrupt(run_id, client, withdraw_queued=queued)
         task.cancel()
         return True
+
+    async def wait(self, run_id: int, timeout: float = 10) -> None:
+        """Wait (a while) for a run that's ending to be recorded as finished."""
+        task = self._tasks.get(run_id)
+        if task is not None and not task.done():
+            await asyncio.wait([task], timeout=timeout)
+
+    @staticmethod
+    async def _interrupt(run_id: int, client: Any, withdraw_queued: bool) -> None:
+        """Stop the current turn. ``withdraw_queued`` also drops messages the CLI still holds, which it
+        would otherwise start on next."""
+        # The SDK has no public call that withdraws queued messages (checked in 0.2.188).
+        control = getattr(client, "_query", None) if withdraw_queued else None
+        try:
+            if control is not None:
+                request = control._send_control_request({"subtype": "interrupt", "cancel_queued": True})
+            else:
+                request = client.interrupt()
+            await asyncio.wait_for(request, timeout=5)
+        except Exception:  # best-effort; ending the run is what counts
+            log.debug("interrupt failed for run %s", run_id, exc_info=True)
 
     async def shutdown(self) -> None:
         for run_id in list(self._tasks):
@@ -285,14 +374,62 @@ class RunManager:
         if pending:
             await asyncio.wait(pending, timeout=10)
 
+    # ------------------------------------------------------------------ messages sent mid-run
+
+    async def send_message(self, run_id: int, prompt: str, images: list[str]) -> str | None:
+        """Queue a message for a working run; returns its id, or None if the run takes no more messages.
+
+        A "queued_message" event records it now, and a "user_message" event with the same id marks where
+        the agent took it in. One without the other, on a finished run, was never read.
+        """
+        inbox = self._inboxes.get(run_id)
+        if inbox is None or inbox.closed:
+            return None
+        message_id = str(uuid.uuid4())
+        inbox.queued[message_id] = _QueuedMessage(prompt, images)
+        self._emit(run_id, "queued_message", inbox.payload(message_id))
+        await self._write_queued(run_id, inbox)
+        return message_id
+
+    async def _write_queued(self, run_id: int, inbox: _Inbox) -> None:
+        """Hand the CLI the queued messages it doesn't have yet, oldest first."""
+        async with inbox.writing:
+            if inbox.client is None:
+                return  # the run sends them once it's under way
+            for message_id, message in list(inbox.queued.items()):
+                if inbox.closed:
+                    return
+                if message.written:
+                    continue
+                try:
+                    await inbox.client.query(prompt_input(message.prompt, message.images, message_id))
+                except Exception:  # the connection is going down; the message stays unread
+                    log.warning("couldn't send a queued message to run %s", run_id, exc_info=True)
+                    return
+                message.written = True
+
+    def _take_in(self, run_id: int, inbox: _Inbox, message_ids: list[str | None]) -> None:
+        """Record that the agent has read these messages (ids that aren't queued messages are ignored)."""
+        for message_id in message_ids:
+            if message_id in inbox.queued:
+                self._emit(run_id, "user_message", inbox.payload(message_id))
+                del inbox.queued[message_id]
+
     # ------------------------------------------------------------------ approvals
 
-    def resolve_approval(self, run_id: int, approval_id: str, allow: bool, message: str = "") -> bool:
+    def resolve_approval(
+        self, run_id: int, approval_id: str, allow: bool, message: str = "", answers: dict[str, str] | None = None
+    ) -> bool:
+        """Settle a pending approval. ``answers`` (question text -> answer) is how a question is allowed."""
         pending = self._approvals.get(approval_id)
         if pending is None or pending.run_id != run_id or pending.future.done():
             return False
-        pending.future.set_result((allow, message))
+        pending.future.set_result((allow, message, answers))
         return True
+
+    def awaits_answers(self, approval_id: str) -> bool:
+        pending = self._approvals.get(approval_id)
+        return pending is not None and pending.tool_name == QUESTION_TOOL
 
     def pending_approvals(self, run_id: int) -> list[str]:
         return [aid for aid, p in self._approvals.items() if p.run_id == run_id and not p.future.done()]
@@ -310,10 +447,12 @@ class RunManager:
         self._emit(run_id, "status", {"message": f"Permissions switched to {MODE_LABELS[mode]}."})
         for pending in list(self._approvals.values()):
             if pending.run_id == run_id and not pending.future.done() and self._auto_allowed(mode, pending.tool_name):
-                pending.future.set_result((True, ""))
+                pending.future.set_result((True, "", None))
 
     @staticmethod
     def _auto_allowed(mode: PermissionMode, tool_name: str) -> bool:
+        if tool_name == QUESTION_TOOL:
+            return False  # only the user can answer, whatever the mode
         if tool_name in MERCURY_TOOLS:
             return True
         return mode == PermissionMode.bypassPermissions or (mode == PermissionMode.acceptEdits and tool_name in EDIT_TOOLS)
@@ -391,6 +530,19 @@ class RunManager:
                 parent_id = parent.parent_run_id
         return 0.0
 
+    def _refresh_usage(self) -> None:
+        """A session just used some of the plan: get a new reading, without holding anything up."""
+
+        async def refresh() -> None:
+            try:
+                await asyncio.to_thread(claude_usage.get_usage, refresh=True)
+            except Exception:  # only the usage gauge depends on it
+                log.warning("couldn't refresh Claude usage", exc_info=True)
+
+        task = asyncio.create_task(refresh())
+        self._background.add(task)  # the event loop alone doesn't keep a task alive
+        task.add_done_callback(self._background.discard)
+
     # ------------------------------------------------------------------ execution
 
     def _build_options(self, run: AgentRun, project: Project, task: Task | None, resume: str | None) -> ClaudeAgentOptions:
@@ -408,16 +560,26 @@ class RunManager:
             self._emit(run.id, "approval_request", {"approval_id": approval_id, "tool_name": tool_name, "input": tool_input})
             self._update_run(run.id, status=RunStatus.waiting_approval)
             try:
-                allow, message = await future
+                allow, message, answers = await future
             finally:
                 self._approvals.pop(approval_id, None)
-            self._emit(run.id, "approval_decision", {"approval_id": approval_id, "allow": allow, "message": message})
+            decision = {"approval_id": approval_id, "tool_name": tool_name, "allow": allow, "message": message}
+            if answers:
+                decision["answers"] = answers
+            self._emit(run.id, "approval_decision", decision)
             self._update_run(run.id, status=RunStatus.running)
             if allow:
-                return PermissionResultAllow()
-            return PermissionResultDeny(message=message or "The user denied this action in Mercury.")
+                return PermissionResultAllow(updated_input={**tool_input, "answers": answers} if answers else None)
+            denied = "The user denied this action in Mercury."
+            if tool_name == QUESTION_TOOL:
+                denied = "The user dismissed the question in Mercury without answering it."
+            return PermissionResultDeny(message=message or denied)
 
         options: dict[str, Any] = {}
+        if run.purpose == RunPurpose.work:
+            # The CLI echoes each message as the agent takes it in, which places queued ones in the transcript.
+            options["extra_args"] = {"replay-user-messages": None}
+            options["max_buffer_size"] = MAX_CLI_LINE_BYTES
         organize_board = run.purpose == RunPurpose.organize_board
         mercury_tools = MERCURY_TOOLS if organize_board else MERCURY_TOOLS - ORGANIZER_TASK_TOOLS
         if run.purpose != RunPurpose.work:
@@ -466,45 +628,26 @@ class RunManager:
         resume = parent.session_id if parent else None
         self._update_run(run_id, status=RunStatus.running, started_at=utcnow())
         self._set_task_status(run.task_id, TaskStatus.in_progress, {TaskStatus.backlog, TaskStatus.todo})
-        final: dict[str, Any] = {}
+        inbox = self._inboxes.setdefault(run_id, _Inbox())
 
         try:
             if not project:
                 raise RuntimeError("This project no longer exists.")
             if run.purpose == RunPurpose.work and not project.repo_path:
                 raise RuntimeError("This project has no local repository folder. Set one in project settings.")
+            scratch.prepare_folder(project)
             options = self._build_options(run, project, task, resume)
             client = self.client_factory(options)
             self._clients[run_id] = client
             async with client:
                 await client.query(prompt_input(run.prompt, run.images))
-                async for message in client.receive_response():
-                    run_cost = None
-                    if isinstance(message, ResultMessage) and message.total_cost_usd is not None:
-                        # total_cost_usd is the resumed session's running total, not this run's.
-                        run_cost = max(0.0, message.total_cost_usd - self._session_cost_before(run, message.session_id))
-                    for kind, payload in serialize_message(message):
-                        if kind == "result":
-                            payload["cost_usd"] = run_cost
-                        self._emit(run_id, kind, payload)
-                        if kind == "system" and payload.get("session_id"):
-                            self._update_run(run_id, session_id=payload["session_id"])
-                    if isinstance(message, ResultMessage):
-                        final = {
-                            "status": RunStatus.failed if message.is_error else RunStatus.succeeded,
-                            "result": message.result,
-                            "cost_usd": run_cost,
-                            "session_cost_usd": message.total_cost_usd,
-                            "num_turns": message.num_turns,
-                            "session_id": message.session_id,
-                        }
-                        if message.is_error:
-                            final["error"] = message.result or message.subtype
-            if not final:
-                final = {"status": RunStatus.failed, "error": "The agent ended without a result."}
+                inbox.client = client
+                await self._write_queued(run_id, inbox)
+                final = await self._receive(run, client, inbox)
             self._update_run(run_id, finished_at=utcnow(), **final)
             if final["status"] == RunStatus.succeeded:
                 self._set_task_status(run.task_id, TaskStatus.review, {TaskStatus.in_progress})
+                self._refresh_usage()
         except asyncio.CancelledError:
             self._emit(run_id, "status", {"message": "Run cancelled."})
             self._update_run(run_id, status=RunStatus.cancelled, finished_at=utcnow())
@@ -516,5 +659,75 @@ class RunManager:
             self._clients.pop(run_id, None)
             self._seq.pop(run_id, None)
             self._modes.pop(run_id, None)
+            inbox.closed = True
+            self._inboxes.pop(run_id, None)
             for aid in self.pending_approvals(run_id):
                 self._approvals.pop(aid, None)
+
+    async def _receive(self, run: AgentRun, client: Any, inbox: _Inbox) -> dict[str, Any]:
+        """Record the agent's turns until it has answered everything it was sent.
+
+        Returns the fields that finish the run. Closes the inbox.
+        """
+        final: dict[str, Any] = {}
+        cost: float | None = None  # this run's share, over all its turns
+        session_total: float | None = None  # the session's running total, as of the latest turn
+        num_turns = 0
+        initialised = False
+        start_within: float | None = None  # the first turn may take as long as it likes to start
+
+        while True:
+            result: ResultMessage | None = None
+            heard = False
+            async for message in _turn(client, start_within):
+                heard = True
+                turn_cost = None
+                if isinstance(message, UserMessage):
+                    self._take_in(run.id, inbox, [message.uuid])
+                elif isinstance(message, ResultMessage):
+                    result = message
+                    self._take_in(run.id, inbox, list(message.user_message_uuids or []))
+                    if message.total_cost_usd is not None:
+                        # total_cost_usd is the resumed session's running total, not this turn's.
+                        before = session_total
+                        if before is None:
+                            before = self._session_cost_before(run, message.session_id)
+                        turn_cost = max(0.0, message.total_cost_usd - before)
+                        cost = (cost or 0.0) + turn_cost
+                        session_total = message.total_cost_usd
+                for kind, payload in serialize_message(message):
+                    if kind == "system":
+                        if initialised:
+                            continue  # the CLI re-announces the session at the start of every turn
+                        initialised = True
+                    elif kind == "result":
+                        payload["cost_usd"] = turn_cost
+                    self._emit(run.id, kind, payload)
+                    if kind == "system" and payload.get("session_id"):
+                        self._update_run(run.id, session_id=payload["session_id"])
+
+            if result is None:
+                if heard or not final:
+                    final |= {"status": RunStatus.failed, "error": "The agent ended without a result."}
+                break  # else the CLI never started on what was still queued; the last turn's outcome stands
+            num_turns += result.num_turns
+            progress = {
+                "result": result.result,
+                "cost_usd": cost,
+                "session_cost_usd": session_total,
+                "num_turns": num_turns,
+                "session_id": result.session_id,
+            }
+            final = {"status": RunStatus.failed if result.is_error else RunStatus.succeeded, **progress}
+            if result.is_error:
+                final["error"] = result.result or result.subtype
+            if result.is_error or not inbox.queued:
+                break
+            self._update_run(run.id, **progress)  # kept even if the user stops the next turn
+            start_within = NEXT_TURN_TIMEOUT
+
+        withdraw = bool(inbox.queued) and not inbox.closed  # a Stop has already withdrawn them
+        inbox.closed = True
+        if withdraw:
+            await self._interrupt(run.id, client, withdraw_queued=True)
+        return final

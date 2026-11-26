@@ -1,9 +1,7 @@
-import { useState } from "react";
-import { api } from "../api";
-import { timeAgo, useLoader, usePolling } from "../hooks";
+import { useEffect, useState } from "react";
+import { timeAgo } from "../hooks";
 import type { UsageWindow } from "../types";
-
-const POLL_MS = 60_000;
+import type { ClaudeUsageState } from "../usage";
 
 function resetLabel(iso: string): string {
   const at = new Date(iso);
@@ -22,6 +20,11 @@ export function countdown(iso: string): string {
   if (d > 0) return `in ${d}d ${h}h`;
   if (h > 0) return `in ${h}h ${m}m`;
   return `in ${m}m`;
+}
+
+/** Whether a window has reset since its percentage was read, which only happens with an old reading. */
+export function hasReset(iso: string): boolean {
+  return new Date(iso).getTime() <= Date.now();
 }
 
 export function level(pct: number): "ok" | "warn" | "crit" {
@@ -62,28 +65,33 @@ function UsageBar({ w }: { w: UsageWindow }) {
       </div>
       {w.resets_at && (
         <div className="usage-reset faint">
-          {resetLabel(w.resets_at)} · {countdown(w.resets_at)}
+          {hasReset(w.resets_at)
+            ? "Reset since this reading"
+            : `${resetLabel(w.resets_at)} · ${countdown(w.resets_at)}`}
         </div>
       )}
     </div>
   );
 }
 
-export function UsagePage() {
-  const usage = useLoader(() => api.claudeUsage(), []);
-  usePolling(usage.reload, POLL_MS);
+export function UsagePage({ usage }: { usage: ClaudeUsageState }) {
   const [refreshing, setRefreshing] = useState(false);
+  const { pull } = usage;
 
   const refresh = async () => {
     setRefreshing(true);
     try {
-      usage.setData(await api.claudeUsage(true));
-    } catch {
-      await usage.reload();
+      await pull();
     } finally {
       setRefreshing(false);
     }
   };
+
+  // Opening the page asks for a new reading; the last one shows meanwhile.
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const data = usage.data;
   return (
@@ -109,9 +117,17 @@ export function UsagePage() {
             {usage.error && !data && <p className="error-text">Can't load usage: {usage.error}</p>}
             {!data && !usage.error && <p className="faint">Loading…</p>}
 
+            {data?.status === "ok" && data.message && (
+              <p className="muted">
+                Showing an earlier reading. {data.message}
+                {data.retry_at && ` Trying again ${countdown(data.retry_at)}.`}
+              </p>
+            )}
+
             {data && data.status !== "ok" && (
               <p className={data.status === "error" ? "error-text" : "muted"}>
                 {data.message}
+                {data.status === "error" && data.retry_at && ` Trying again ${countdown(data.retry_at)}.`}
                 {data.status === "signed_out" && (
                   <>
                     {" "}

@@ -219,7 +219,7 @@ export function TaskModal({ task, projectKey, canRunAgent, onClose, onSaved, onR
 const STATUS_NOTE: Partial<Record<string, string>> = {
   queued: "Starting…",
   running: "Claude is working on this now.",
-  waiting_approval: "Waiting for your approval.",
+  waiting_approval: "Waiting for you.",
   cancelled: "Stopped before Claude wrapped up.",
 };
 

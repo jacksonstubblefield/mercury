@@ -207,6 +207,7 @@ def export_final(root: Path) -> None:
     public.mkdir(exist_ok=True)
     scaled(img, 32).save(public / "favicon-32.png")
     scaled(img, 64).save(public / "favicon-64.png")
+    scaled(img, 128).save(public / "favicon-128.png")  # sidebar brand icon
 
 
 def main() -> None:

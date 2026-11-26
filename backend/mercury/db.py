@@ -42,7 +42,7 @@ def reset_engine() -> None:
 def init_db() -> None:
     from . import models  # noqa: F401  (register tables)
 
-    from .services import doc_store, refs
+    from .services import doc_store, refs, scratch
 
     engine = get_engine()
     _migrate(engine)
@@ -59,6 +59,7 @@ def init_db() -> None:
             doc_store.create_fts(conn)
     with Session(engine) as session:
         doc_store.backfill(session)
+        scratch.ensure(session)
 
 
 # Columns added to existing tables after their first release: (table, column, DDL).
@@ -89,6 +90,7 @@ _ADDED_COLUMNS = [
     ("task", "number", "INTEGER"),
     ("doc", "number", "INTEGER"),
     ("task", "images", "JSON NOT NULL DEFAULT '[]'"),
+    ("project", "scratch", "BOOLEAN NOT NULL DEFAULT 0"),
 ]
 
 

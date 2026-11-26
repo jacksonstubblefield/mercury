@@ -20,6 +20,9 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "github", label: "GitHub" },
 ];
 
+/** Scratch isn't a codebase: just its sessions, board and docs, with sessions first. */
+const SCRATCH_TABS: TabId[] = ["agents", "board", "docs"];
+
 interface Props {
   project: Project;
   onChanged: () => void;
@@ -28,7 +31,8 @@ interface Props {
 }
 
 export function ProjectView({ project, onChanged, openSession }: Props) {
-  const [tab, setTab] = useState<TabId>(openSession ? "agents" : "overview");
+  const tabs = project.scratch ? SCRATCH_TABS.map((id) => TABS.find((t) => t.id === id)!) : TABS;
+  const [tab, setTab] = useState<TabId>(openSession || project.scratch ? "agents" : "overview");
   const [editing, setEditing] = useState(false);
   // A task handed to the Agents tab from the board ("Run agent").
   const [agentTask, setAgentTask] = useState<Task | null>(null);
@@ -63,16 +67,17 @@ export function ProjectView({ project, onChanged, openSession }: Props) {
           </button>
         </h1>
         <div className="meta">
+          {project.scratch && <span>Sessions that don't belong to a project</span>}
           {project.repo_path ? <code>{project.repo_path}</code> : <span className="faint">No local repo set</span>}
-          {project.github_repo && (
+          {!project.scratch && project.github_repo && (
             <a href="#" onClick={(e) => (e.preventDefault(), openExternal(`https://github.com/${project.github_repo}`))}>
               github.com/{project.github_repo}
             </a>
           )}
-          <span>Status: {project.status}</span>
+          {!project.scratch && <span>Status: {project.status}</span>}
         </div>
         <nav className="tabs">
-          {TABS.map((t) => (
+          {tabs.map((t) => (
             <button key={t.id} className={`tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>
               {t.label}
               {t.id === "agents" && project.active_runs > 0 && <span className="badge live" style={{ marginLeft: 6 }}>{project.active_runs}</span>}

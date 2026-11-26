@@ -83,8 +83,9 @@ label { display: block; color: var(--text-dim); font-size: 12px; margin: 10px 0 
   min-height: 0;
 }
 .brand { padding: 16px; font-weight: 700; font-size: 16px; letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; }
-/* App icon (scripts/make_icon.py): 32px is its native pixel grid; keep the pixels crisp. */
-.brand-icon { width: 32px; height: 32px; margin: -6px; image-rendering: pixelated; flex-shrink: 0; }
+/* App icon (scripts/make_icon.py, favicon-128.png). Smooth scaling on purpose: pixelated read as too harsh here (MER-13).
+   Negative margins cancel the image's transparent padding so the symbol lines up with the padding and text. */
+.brand-icon { width: 44px; height: 44px; margin: -6px -4px -6px -8px; flex-shrink: 0; }
 .sidebar-section { padding: 4px 8px; overflow-y: auto; flex: 1; }
 .sidebar-heading { color: var(--text-faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; padding: 8px 8px 4px; }
 .project-item {
@@ -101,6 +102,10 @@ label { display: block; color: var(--text-dim); font-size: 12px; margin: 10px 0 
 }
 .badge.live { background: var(--accent-dim); color: var(--text); }
 .sidebar-footer { padding: 12px; border-top: 1px solid var(--border); }
+/* pinned under the scrolling project list, right above .sidebar-nav's separator */
+.sidebar-scratch { padding: 4px 8px 6px; }
+/* in the dot's place, so Scratch's name lines up with the projects below it */
+.nav-icon.scratch-icon { width: 12px; height: 12px; margin: 0 -2px; stroke-linejoin: round; }
 
 /* Sessions: running, waiting on the user, or finished and unseen (Sidebar.tsx) */
 .sidebar-sessions { padding: 0 8px 6px; border-bottom: 1px solid var(--border); max-height: 40%; overflow-y: auto; flex-shrink: 0; }
@@ -228,7 +233,7 @@ label { display: block; color: var(--text-dim); font-size: 12px; margin: 10px 0 
 .modal-actions { display: flex; gap: 8px; margin-top: 18px; }
 
 /* docs */
-.docs { display: grid; grid-template-columns: 280px 1fr; gap: 16px; height: 100%; }
+.docs { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; height: 100%; }
 .doc-list { overflow-y: auto; min-height: 0; }
 .doc-search { width: 100%; margin-bottom: 4px; }
 .doc-search-status { font-size: 11px; margin: 0 2px 8px; }
@@ -283,13 +288,16 @@ label { display: block; color: var(--text-dim); font-size: 12px; margin: 10px 0 
 .markdown td, .markdown th { border: 1px solid var(--border); padding: 4px 8px; }
 
 /* agents */
-.agents { display: grid; grid-template-columns: 340px 1fr; gap: 16px; height: 100%; min-height: 0; }
+/* the session list gives up width in narrow windows, so the conversation keeps more of it */
+.agents { display: grid; grid-template-columns: clamp(220px, 30%, 340px) minmax(0, 1fr); gap: 16px; height: 100%; min-height: 0; }
 .agents-side { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 .run-list { overflow-y: auto; flex: 1; }
 .run-item { padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; border: 1px solid transparent; }
 .run-item:hover { background: var(--bg-hover); }
 .run-item.active { background: var(--bg-elev-2); border-color: var(--border); }
 .run-item .prompt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-item-meta { font-size: 12px; flex-wrap: wrap; row-gap: 2px; }
+.run-item-meta > * { white-space: nowrap; }
 .status { font-size: 11px; padding: 1px 7px; border-radius: 10px; text-transform: capitalize; }
 .status.queued, .status.running { background: var(--accent-dim); color: var(--text); }
 .status.waiting_approval { background: var(--warn-bg); color: var(--warn); }
@@ -297,7 +305,17 @@ label { display: block; color: var(--text-dim); font-size: 12px; margin: 10px 0 
 .status.failed { background: var(--err-bg); color: var(--err); }
 .status.cancelled { background: var(--bg-hover); color: var(--text-dim); }
 .run-view { display: flex; flex-direction: column; min-height: 0; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); }
-.run-head { padding: 10px 16px; border-bottom: 1px solid var(--border); flex-wrap: nowrap; font-size: 13px; }
+.run-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; container-type: inline-size; }
+.run-head-name, .run-head-details, .run-head-actions { display: flex; align-items: center; gap: 8px; }
+/* the title keeps at least this much of its line; below that, the rest wraps under it */
+.run-head-name { flex: 1 1 240px; min-width: 0; }
+.run-head-name .status { flex-shrink: 0; white-space: nowrap; }
+.run-head-details { white-space: nowrap; }
+.run-head-actions { margin-left: auto; }
+/* turns and cost also show at the end of each turn, so they're the first to go */
+@container (max-width: 440px) {
+  .run-head-stat { display: none; }
+}
 .session-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 
 /* task modal: the agent sessions that worked on this task */
@@ -321,7 +339,9 @@ label { display: block; color: var(--text-dim); font-size: 12px; margin: 10px 0 
 /* conversation */
 .transcript-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
 .transcript { position: relative; flex: 1; overflow-y: auto; outline: none; }
-.transcript-content { padding: 16px; display: flex; flex-direction: column; gap: 18px; }
+/* long paths, links and tool names break rather than making the whole conversation scroll sideways */
+.transcript-content { padding: 16px; display: flex; flex-direction: column; gap: 18px; overflow-wrap: anywhere; }
+.transcript-content .markdown table { display: block; overflow-x: auto; overflow-wrap: normal; }
 .turn { display: flex; flex-direction: column; gap: 10px; }
 .msg-user {
   align-self: flex-end; max-width: 85%; background: var(--bg-elev-2); border: 1px solid var(--border);
@@ -330,6 +350,9 @@ label { display: block; color: var(--text-dim); font-size: 12px; margin: 10px 0 
 .msg-user .msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-user .msg-meta { font-size: 11px; color: var(--text-faint); margin-top: 4px; text-align: right; }
 .msg-user.flash { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+/* queued for a working agent, or never read by it */
+.msg-user.unread { background: transparent; border-style: dashed; }
+.msg-user.unread .msg-text { color: var(--text-dim); }
 .jump-latest { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4); }
 .ev-text .markdown > :first-child, .ev-error .markdown > :first-child { margin-top: 0; }
 .ev-text .markdown > :last-child, .ev-error .markdown > :last-child { margin-bottom: 0; }
@@ -340,6 +363,17 @@ label { display: block; color: var(--text-dim); font-size: 12px; margin: 10px 0 
 .ev-tool .body { padding: 8px 10px; border-top: 1px solid var(--border); max-height: 360px; overflow: auto; }
 .ev-tool .body.err { color: var(--err); }
 .ev-approval { border: 1px solid var(--warn); background: var(--warn-bg); border-radius: var(--radius-sm); padding: 10px 12px; }
+.ev-question { display: flex; flex-direction: column; gap: 14px; }
+.ev-question fieldset { display: flex; flex-direction: column; gap: 6px; border: 0; margin: 0; padding: 0; min-width: 0; }
+.ev-question-text { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-weight: 600; }
+.ev-question-chip { font-size: 11px; font-weight: 400; color: var(--text-dim); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0 6px; }
+.ev-question label.ev-option { display: flex; align-items: flex-start; gap: 8px; margin: 0; padding: 7px 10px; font-size: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; }
+.ev-question label.ev-option.picked { border-color: var(--accent); }
+.ev-option input { width: auto; flex-shrink: 0; margin-top: 3px; accent-color: var(--accent); }
+.ev-option > span { display: flex; flex-direction: column; min-width: 0; }
+.ev-option small { color: var(--text-dim); }
+.ev-option pre { margin: 6px 0 0; max-height: 200px; overflow: auto; }
+.ev-answers { display: flex; flex-direction: column; gap: 6px; border-left: 2px solid var(--accent); padding-left: 10px; white-space: pre-wrap; }
 .ev-done { color: var(--ok); font-size: 12px; }
 .ev-error { border: 1px solid var(--err); background: var(--err-bg); border-radius: var(--radius-sm); padding: 10px 12px; }
 .ev-system { color: var(--text-faint); font-size: 12px; }
@@ -355,6 +389,9 @@ label { display: block; color: var(--text-dim); font-size: 12px; margin: 10px 0 
   .composer-hint { display: none; }
 }
 .composer textarea { min-height: 44px; max-height: 240px; resize: vertical; }
+/* in a narrow composer the buttons drop to their own line rather than running off the side */
+.composer-row { flex-wrap: wrap; }
+.composer-actions { display: flex; gap: 8px; margin-left: auto; }
 select.small { width: auto; padding: 3px 8px; font-size: 12px; }
 
 /* pasted images: composer previews, transcript thumbnails, full-size view */
@@ -457,7 +494,7 @@ table.diff .sign { display: inline-block; width: 1.2em; color: var(--text-faint)
 .session-layout.with-changes { grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr); }
 .session-layout > .run-view { min-width: 0; }
 .btn.active { border-color: var(--accent); color: var(--accent); }
-.run-head .btn, .run-head > .faint { flex-shrink: 0; white-space: nowrap; }
+.run-head .btn { flex-shrink: 0; white-space: nowrap; }
 
 .ev-edit summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; }
 .ev-edit-path { color: var(--text); text-decoration: none; overflow-wrap: anywhere; }

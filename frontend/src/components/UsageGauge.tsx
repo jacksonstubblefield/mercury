@@ -1,9 +1,8 @@
-import { api } from "../api";
-import { useLoader, usePolling } from "../hooks";
+import { timeAgo } from "../hooks";
 import type { ClaudeUsage, UsageWindow } from "../types";
-import { countdown, level } from "./UsagePage";
+import type { ClaudeUsageState } from "../usage";
+import { countdown, hasReset, level } from "./UsagePage";
 
-const POLL_MS = 60_000;
 const SIZE = 40;
 const STROKE = 4;
 const R = (SIZE - STROKE) / 2;
@@ -19,10 +18,12 @@ function tooltip(u: ClaudeUsage | undefined, error: string | null | undefined): 
   if (!u) return error ? `Can't load usage: ${error}` : "Loading Claude Code usage…";
   if (u.status !== "ok") return u.message ?? "Claude Code usage is unavailable.";
   if (u.windows.length === 0) return "Anthropic didn't report any plan limits.";
+  const reset = (at: string) => (hasReset(at) ? "reset since this reading" : `resets ${countdown(at)}`);
   const lines = u.windows.map(
-    (w) => `${w.label}: ${Math.round(w.utilization)}%${w.resets_at ? ` · resets ${countdown(w.resets_at)}` : ""}`,
+    (w) => `${w.label}: ${Math.round(w.utilization)}%${w.resets_at ? ` · ${reset(w.resets_at)}` : ""}`,
   );
-  return ["Claude Code usage", ...lines, "", "Click for details"].join("\n");
+  const stale = u.message ? ["", `Updated ${timeAgo(u.fetched_at)}. ${u.message}`] : [];
+  return ["Claude Code usage", ...lines, ...stale, "", "Click for details"].join("\n");
 }
 
 /** How far through a window we are, 0-1, or null without a reset time. */
@@ -34,10 +35,7 @@ function elapsed(w: UsageWindow): number | null {
 }
 
 /** A radial gauge of Claude Code plan usage, in the top right of the app. A full ring is 100%. */
-export function UsageGauge({ onOpen }: { onOpen: () => void }) {
-  const usage = useLoader(() => api.claudeUsage(), []);
-  usePolling(usage.reload, POLL_MS);
-
+export function UsageGauge({ usage, onOpen }: { usage: ClaudeUsageState; onOpen: () => void }) {
   const w = primaryWindow(usage.data);
   const pct = w ? Math.min(100, w.utilization) : 0;
   const t = w ? elapsed(w) : null;

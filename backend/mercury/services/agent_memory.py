@@ -117,6 +117,27 @@ def docs_instructions(project_id: int) -> str:
     return "\n".join(parts)
 
 
+def scratch_docs_instructions(project_id: int) -> str:
+    """The docs section for scratch sessions. They're unrelated to each other, so unlike project runs
+    they aren't asked to read up first or to keep a memory; rules docs still apply."""
+    with Session(get_engine()) as s:
+        total = s.exec(select(func.count()).select_from(Doc).where(Doc.project_id == project_id)).one()
+    t = f"mcp__{SERVER_NAME}__"
+    parts = [
+        "## Scratch docs",
+        f"Scratch has {total} doc(s) in Mercury (tools: {t}search_docs, browse_docs, read_doc, create_doc, "
+        "update_doc and others). Scratch sessions are usually unrelated, so there's no running memory to keep: "
+        "search the docs when the request refers to earlier work or notes, and create or change docs only when "
+        "the user asks, including when they state a lasting preference for scratch sessions (a doc with kind "
+        '"rules", which every scratch session is given).',
+        "Claude Code's own memory folder (~/.claude/projects/<repo>/memory) is read-only inside Mercury.",
+    ]
+    rules = rules_instructions(project_id)
+    if rules:
+        parts.append(rules)
+    return "\n".join(parts)
+
+
 def _rules_section(rules: list[Doc], key: str | None) -> str:
     t = f"mcp__{SERVER_NAME}__"
     text, used = [], 0

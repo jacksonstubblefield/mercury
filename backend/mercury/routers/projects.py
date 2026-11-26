@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, HTTPException
 from sqlmodel import func, select
 
 from ..models import (
     ACTIVE_RUN_STATUSES,
+    AgentEvent,
     AgentRun,
     Project,
     ProjectCreate,
@@ -14,7 +17,7 @@ from ..models import (
     TaskStatus,
     utcnow,
 )
-from ..services import attachments, gitinfo, refs
+from ..services import attachments, gitinfo, refs, scratch
 from .deps import SessionDep, get_project_or_404
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -84,8 +87,16 @@ def update_project(project_id: int, body: ProjectUpdate, session: SessionDep):
     changes = body.model_dump(exclude_unset=True)
     if "key" in changes:
         changes["key"] = _check_key(session, changes["key"], project_id)
+    if project.scratch:
+        # Settings forms send every field, so only an actual change is refused.
+        if any(f in changes and changes[f] != getattr(project, f) for f in ("name", "status")):
+            raise HTTPException(400, "Scratch is built in: it can't be renamed, paused or archived.")
+        if "repo_path" in changes and not (changes["repo_path"] or "").strip():
+            changes["repo_path"] = str(scratch.default_folder())  # blank means back to Mercury's own folder
     project.sqlmodel_update(changes)
-    _detect_github_repo(project)
+    scratch.prepare_folder(project)
+    if not project.scratch:  # its folder may sit inside some unrelated checkout (e.g. a home-folder repo)
+        _detect_github_repo(project)
     project.updated_at = utcnow()
     session.add(project)
     session.commit()
@@ -96,9 +107,18 @@ def update_project(project_id: int, body: ProjectUpdate, session: SessionDep):
 @router.delete("/{project_id}", status_code=204)
 def delete_project(project_id: int, session: SessionDep):
     project = get_project_or_404(session, project_id)
+    if project.scratch:
+        raise HTTPException(400, "Scratch is built in and can't be deleted.")
     runs = session.exec(select(AgentRun).where(AgentRun.project_id == project_id)).all()
     tasks = session.exec(select(Task).where(Task.project_id == project_id)).all()
     images = [name for run in runs for name in run.images] + [name for task in tasks for name in task.images]
+    # Messages sent while a run was working keep their pictures in the run's events.
+    queued = session.exec(
+        select(AgentEvent.payload)
+        .join(AgentRun)
+        .where(AgentRun.project_id == project_id, AgentEvent.kind == "queued_message")
+    ).all()
+    images += [name for payload in queued for name in json.loads(payload)["images"]]
     session.delete(project)
     session.commit()
     attachments.delete(images)

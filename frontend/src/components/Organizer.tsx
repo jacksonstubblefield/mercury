@@ -113,10 +113,10 @@ export function Organizer({ project, target, onChanged, onOpenRun, onFinished }:
         </button>
         {active && run && (
           <>
-            {run.status === "waiting_approval" && <span className="faint">waiting for your approval</span>}
-            <a href="#" className="organizer-link" onClick={(e) => (e.preventDefault(), onOpenRun(run.id))}>
+            <button className="btn small" title="Open the organizer's session" onClick={() => onOpenRun(run.id)}>
               Watch
-            </a>
+            </button>
+            {run.status === "waiting_approval" && <span className="faint">waiting for your approval</span>}
           </>
         )}
         {error && <span className="error-text">{error}</span>}

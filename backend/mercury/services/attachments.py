@@ -1,7 +1,8 @@
 """Images the user attaches to an agent prompt or a task (usually screenshots).
 
 They're stored as files under ``<data dir>/attachments`` with random names; an
-AgentRun or Task keeps the names in ``images``. Each file belongs to exactly one
+AgentRun or Task keeps the names in ``images``, and a message sent to a working
+run keeps them in its "queued_message" event. Each file belongs to exactly one
 owner (a run started on a task gets its own copies of the task's pictures), so
 deleting the owner can delete its files. When a run starts they're sent to
 Claude as image content blocks next to the prompt text.

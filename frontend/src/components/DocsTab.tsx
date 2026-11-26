@@ -238,8 +238,9 @@ export function DocsTab({ project, onOpenRun }: { project: Project; onOpenRun: (
             )}
             {docs.data && allDocs.length === 0 && (
               <p className="faint">
-                Specs, decisions, research, findings. This is the project's memory: agents search it, and save what
-                they learn here.
+                {project.scratch
+                  ? "Notes for scratch work. Scratch sessions can search these, and add to them when you ask."
+                  : "Specs, decisions, research, findings. This is the project's memory: agents search it, and save what they learn here."}
               </p>
             )}
             {retiredCount > 0 && (

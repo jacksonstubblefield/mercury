@@ -106,7 +106,13 @@ def test_old_databases_get_keys_and_numbers(tmp_path, monkeypatch):
     con = sqlite3.connect(path)
     con.executescript(
         """
-        CREATE TABLE project (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL);
+        CREATE TABLE project (
+            id INTEGER PRIMARY KEY, name VARCHAR NOT NULL,
+            description VARCHAR NOT NULL DEFAULT '', repo_path VARCHAR, github_repo VARCHAR,
+            status VARCHAR(8) NOT NULL DEFAULT 'active', color VARCHAR NOT NULL DEFAULT '#7c8cff',
+            created_at DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00',
+            updated_at DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00'
+        );
         CREATE TABLE task (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, title VARCHAR NOT NULL);
         CREATE TABLE doc (
             title VARCHAR NOT NULL, body VARCHAR NOT NULL DEFAULT '', pinned BOOLEAN NOT NULL DEFAULT 0,
@@ -114,7 +120,7 @@ def test_old_databases_get_keys_and_numbers(tmp_path, monkeypatch):
             created_at DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00',
             updated_at DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00'
         );
-        INSERT INTO project VALUES (1, 'Mercury'), (2, 'Mercury two'), (3, 'Website');
+        INSERT INTO project (id, name) VALUES (1, 'Mercury'), (2, 'Mercury two'), (3, 'Website');
         INSERT INTO task VALUES (5, 1, 'a'), (6, 3, 'b'), (9, 1, 'c'), (23, 1, 'd');
         INSERT INTO doc (id, project_id, title) VALUES (4, 3, 'x'), (8, 3, 'y'), (10, 1, 'z');
         """
@@ -138,7 +144,7 @@ def test_old_databases_get_keys_and_numbers(tmp_path, monkeypatch):
         indexes = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
     finally:
         con.close()
-    assert keys == [(1, "MER", 3, 1), (2, "MT", 0, 0), (3, "WEB", 1, 2)]
+    assert keys == [(1, "MER", 3, 1), (2, "MT", 0, 0), (3, "WEB", 1, 2), (4, "SCR", 0, 0)]  # 4: Scratch, added
     assert tasks == [(5, 1, 1), (6, 3, 1), (9, 1, 2), (23, 1, 3)]  # creation order within each project
     assert docs == [(4, 3, 1), (8, 3, 2), (10, 1, 1)]
     assert {"ux_project_key", "ux_task_project_number", "ux_doc_project_number"} <= indexes

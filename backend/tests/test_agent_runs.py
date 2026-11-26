@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import time
 
+import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     PermissionResultAllow,
+    PermissionResultDeny,
     ResultMessage,
     SystemMessage,
     TextBlock,
@@ -551,3 +553,54 @@ def test_attention_shows_a_session_once_under_its_first_prompt(make_client, tmp_
     items = client.get("/api/sessions/attention").json()
     assert len(items) == 1
     assert (items[0]["root_run_id"], items[0]["run_id"], items[0]["title"]) == (first["id"], second["id"], "start here")
+
+
+QUESTIONS = {"questions": [{"question": "Which colour?", "header": "Colour", "options": [{"label": "Red"}, {"label": "Blue"}]}]}
+
+
+class QuestionClient(FakeClient):
+    """Asks the user a question, and keeps the decision it got."""
+
+    decision = None
+
+    async def receive_response(self):
+        yield SystemMessage(subtype="init", data={"session_id": "sess-1", "model": "claude-opus-5-5"})
+        tool = ToolUseBlock(id="tu1", name="AskUserQuestion", input=QUESTIONS)
+        yield AssistantMessage(content=[tool], model="claude-opus-5-5")
+        QuestionClient.decision = await self.options.can_use_tool(
+            "AskUserQuestion", QUESTIONS, ToolPermissionContext(tool_use_id="tu1")
+        )
+        yield ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1, session_id="sess-1", result="ok"
+        )
+
+
+def _ask(make_client, tmp_path, mode):
+    client = make_client(lambda opts: QuestionClient(opts))
+    p, _ = _setup(client, tmp_path)
+    run_id = client.post(f"/api/projects/{p['id']}/runs", json={"prompt": "go", "permission_mode": mode}).json()["id"]
+    _wait_for(client, run_id, {"waiting_approval"})
+    request = next(e for e in client.get(f"/api/runs/{run_id}/events").json() if e["kind"] == "approval_request")
+    return client, run_id, f"/api/runs/{run_id}/approvals/{request['payload']['approval_id']}"
+
+
+@pytest.mark.parametrize("mode", ["plan", "default", "acceptEdits", "bypassPermissions"])
+def test_questions_wait_for_the_users_answers_in_every_mode(make_client, tmp_path, mode):
+    client, run_id, url = _ask(make_client, tmp_path, mode)
+    assert client.post(url, json={"allow": True}).status_code == 400  # allowing without an answer means nothing
+    assert client.post(url, json={"allow": True, "answers": {"Which colour?": "Blue"}}).status_code == 200
+    _wait_for(client, run_id, {"succeeded"})
+    assert QuestionClient.decision.updated_input == {**QUESTIONS, "answers": {"Which colour?": "Blue"}}
+    events = client.get(f"/api/runs/{run_id}/events").json()
+    decision = next(e for e in events if e["kind"] == "approval_decision")["payload"]
+    assert decision["answers"] == {"Which colour?": "Blue"}
+
+
+def test_switching_to_full_auto_leaves_a_question_open(make_client, tmp_path):
+    client, run_id, url = _ask(make_client, tmp_path, "default")
+    run = client.post(f"/api/runs/{run_id}/permission-mode", json={"permission_mode": "bypassPermissions"}).json()
+    assert run["status"] == "waiting_approval"
+    assert client.post(url, json={"allow": False}).status_code == 200
+    _wait_for(client, run_id, {"succeeded"})
+    assert isinstance(QuestionClient.decision, PermissionResultDeny)
+    assert "without answering" in QuestionClient.decision.message

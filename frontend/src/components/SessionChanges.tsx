@@ -278,7 +278,17 @@ export function ChangesPanel({
         )}
       </div>
       {selFile ? (
-        <FileViewer key={selFile.key} project={project} path={selFile.path} shown={selFile.shown} inRepo={selFile.inRepo} edits={selFile.edits} refreshKey={status.data} />
+        <FileViewer
+          key={selFile.key}
+          project={project}
+          path={selFile.path}
+          shown={selFile.shown}
+          inRepo={selFile.inRepo}
+          // e.g. Scratch's folder: "Since last commit" and "File" both need a git repository
+          noGit={status.data?.is_repo === false}
+          edits={selFile.edits}
+          refreshKey={status.data}
+        />
       ) : selOther ? (
         <FileViewer key={selOther.abs} project={project} path={selOther.abs} shown={selOther.path} inRepo edits={[]} refreshKey={status.data} />
       ) : (
@@ -295,22 +305,29 @@ function FileViewer({
   path,
   shown,
   inRepo,
+  noGit = false,
   edits,
   refreshKey,
 }: {
   project: Project;
   path: string;
   shown: string;
+  /** Inside the project folder. */
   inRepo: boolean;
+  /** The project folder is known not to be a git repository. */
+  noGit?: boolean;
   edits: FileEdit[];
   refreshKey: unknown;
 }) {
+  const fromGit = inRepo && !noGit;
   const modes: { id: ViewMode; label: string; title: string }[] = [
-    ...(inRepo ? [{ id: "commit" as const, label: "Since last commit", title: "Everything that differs from the last commit, whoever changed it" }] : []),
+    ...(fromGit ? [{ id: "commit" as const, label: "Since last commit", title: "Everything that differs from the last commit, whoever changed it" }] : []),
     ...(edits.length ? [{ id: "session" as const, label: `Claude's edits (${edits.length})`, title: "Each edit Claude made to this file in this session, in order" }] : []),
-    ...(inRepo ? [{ id: "file" as const, label: "File", title: "The file as it is now" }] : []),
+    ...(fromGit ? [{ id: "file" as const, label: "File", title: "The file as it is now" }] : []),
   ];
-  const [mode, setMode] = useState<ViewMode>(modes[0]?.id ?? "session");
+  const [picked, setMode] = useState<ViewMode>(modes[0]?.id ?? "session");
+  // The picked view can go away once the folder turns out not to be a repository.
+  const mode = modes.some((m) => m.id === picked) ? picked : (modes[0]?.id ?? "session");
   const [raw, setRaw] = useState(false);
 
   return (
@@ -334,7 +351,12 @@ function FileViewer({
         </div>
       )}
       <div className="changes-viewer-body">
-        {!inRepo && <p className="faint scm-hint">This file is outside the project folder, so only Claude's own edits can be shown.</p>}
+        {!fromGit && (
+          <p className="faint scm-hint">
+            {inRepo ? "This folder isn't a git repository" : "This file is outside the project folder"}, so only Claude's own
+            edits can be shown.
+          </p>
+        )}
         {mode === "commit" && <SinceCommit projectId={project.id} path={path} refreshKey={refreshKey} />}
         {mode === "session" && <SessionEdits edits={edits} />}
         {mode === "file" && <FileContents projectId={project.id} path={path} raw={raw} refreshKey={refreshKey} />}

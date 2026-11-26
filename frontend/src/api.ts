@@ -178,11 +178,17 @@ export const api = {
   markSeen: (id: number) => post<AgentRun>(`/api/runs/${id}/seen`),
   followUp: (id: number, prompt: string, permission_mode?: PermissionMode, images?: string[], model?: AgentModel | null) =>
     post<AgentRun>(`/api/runs/${id}/follow-up`, { prompt, permission_mode, images, model }),
+  /** Queue a message for a working run; the agent reads it as soon as it can. 409 once the run is ending. */
+  sendMessage: (runId: number, prompt: string, images: string[]) =>
+    post<{ message_id: string }>(`/api/runs/${runId}/messages`, { prompt, images }),
   attachmentUrl: (name: string) => `/api/attachments/${encodeURIComponent(name)}`,
   setRunMode: (id: number, permission_mode: PermissionMode) =>
     post<AgentRun>(`/api/runs/${id}/permission-mode`, { permission_mode }),
   decide: (runId: number, approvalId: string, allow: boolean, message = "") =>
     post(`/api/runs/${runId}/approvals/${approvalId}`, { allow, message }),
+  /** Answer an agent's questions: question text -> answer. */
+  answer: (runId: number, approvalId: string, answers: Record<string, string>) =>
+    post(`/api/runs/${runId}/approvals/${approvalId}`, { allow: true, answers }),
 
   streamUrl: (runId: number) => {
     const proto = location.protocol === "https:" ? "wss" : "ws";

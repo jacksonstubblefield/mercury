@@ -18,13 +18,17 @@ export interface Project {
   default_permission_mode: PermissionMode | null;
   /** Preselected model for new agent sessions. null: the app-wide default (Preferences). */
   default_model: AgentModel | null;
+  /** The built-in Scratch project, for sessions without a project of their own. It can't be deleted or renamed. */
+  scratch: boolean;
   created_at: string;
   updated_at: string;
   open_tasks: number;
   active_runs: number;
 }
 
-export type ProjectInput = Partial<Omit<Project, "id" | "created_at" | "updated_at" | "open_tasks" | "active_runs">>;
+export type ProjectInput = Partial<
+  Omit<Project, "id" | "scratch" | "created_at" | "updated_at" | "open_tasks" | "active_runs">
+>;
 
 export interface Task {
   id: number;
@@ -213,7 +217,11 @@ export type EventKind =
   | "approval_decision"
   | "result"
   | "status"
-  | "error";
+  | "error"
+  // A message sent while the agent worked: queued when sent, then "user_message" where the agent read it.
+  // Both carry message_id, prompt and images.
+  | "queued_message"
+  | "user_message";
 
 export interface AgentEvent {
   type: "event";
@@ -347,12 +355,15 @@ export interface UsageWindow {
 }
 
 export interface ClaudeUsage {
-  /** signed_out: no Claude subscription sign-in; expired: renew it by running `claude`. */
+  /** signed_out: no Claude subscription sign-in; expired: renew it by running `claude`.
+   * Once there has been a good reading it's always "ok", and a message says why it isn't newer. */
   status: "ok" | "signed_out" | "expired" | "error";
   message: string | null;
   plan: string | null;
   windows: UsageWindow[];
   fetched_at: string | null;
+  /** After a failure: when Anthropic will be asked again. */
+  retry_at: string | null;
 }
 
 /** A named palette. Mirrors `Theme` in models.py; system themes can't be changed or deleted. */

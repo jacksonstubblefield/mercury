@@ -52,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Embedding model unavailable: {embeddings.status().error}", file=sys.stderr)
         return 1
     with Session(get_engine()) as s:
-        project = s.get(Project, args.project) if args.project else s.exec(select(Project)).first()
+        first = select(Project).where(Project.scratch == False)  # noqa: E712
+        project = s.get(Project, args.project) if args.project else s.exec(first).first()
         if project is None:
             print("No such project.", file=sys.stderr)
             return 1

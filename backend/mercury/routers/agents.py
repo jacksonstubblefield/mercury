@@ -11,6 +11,8 @@ from ..models import (
     ACTIVE_RUN_STATUSES,
     AgentEvent,
     AgentFollowUp,
+    AgentMessageCreate,
+    AgentMessageQueued,
     AgentModel,
     AgentRun,
     AgentRunCreate,
@@ -261,6 +263,25 @@ async def follow_up(run_id: int, body: AgentFollowUp, session: SessionDep, runs:
     return run
 
 
+@router.post("/runs/{run_id}/messages", response_model=AgentMessageQueued, status_code=202)
+async def send_message(run_id: int, body: AgentMessageCreate, session: SessionDep, runs: RunsDep):
+    """Send a message to a working run. The agent reads it as soon as it can, without being interrupted."""
+    run = _get_run(session, run_id)
+    if run.purpose != RunPurpose.work:
+        raise HTTPException(409, "Organizer runs don't take messages while they work.")
+    if run.status not in ACTIVE_RUN_STATUSES:
+        raise HTTPException(409, "This run has finished. Send your message as a follow-up.")
+    if not body.prompt.strip() and not body.images:
+        raise HTTPException(400, "Message is empty.")
+    images = _save_images(body.images)
+    message_id = await runs.send_message(run_id, body.prompt, images)
+    if message_id is None:
+        attachments.delete(images)
+        await runs.wait(run_id)  # so that a follow-up sent on seeing this error is accepted
+        raise HTTPException(409, "This run is finishing. Send your message as a follow-up.")
+    return AgentMessageQueued(message_id=message_id)
+
+
 @router.get("/attachments/{name}")
 def get_attachment(name: str):
     """A pasted image, for the transcript. Names are random, so they can't be guessed."""
@@ -285,8 +306,10 @@ async def set_permission_mode(run_id: int, body: PermissionModeUpdate, session: 
 
 
 @router.post("/runs/{run_id}/approvals/{approval_id}")
-def decide_approval(run_id: int, approval_id: str, body: ApprovalDecision, runs: RunsDep):
-    if not runs.resolve_approval(run_id, approval_id, body.allow, body.message):
+async def decide_approval(run_id: int, approval_id: str, body: ApprovalDecision, runs: RunsDep):
+    if body.allow and not body.answers and runs.awaits_answers(approval_id):
+        raise HTTPException(400, "Answer the question, or dismiss it.")
+    if not runs.resolve_approval(run_id, approval_id, body.allow, body.message, body.answers):
         raise HTTPException(404, "No pending approval with that id.")
     return {"ok": True}
 

@@ -99,6 +99,9 @@ class Project(ProjectBase, table=True):
     # Unique, 2-4 characters (services/refs.py): the prefix of the project's task and doc ids, e.g. MER-12.
     # Generated from the name when a project is created without one.
     key: Optional[str] = Field(default=None, max_length=4)
+    # The built-in Scratch project, for sessions without a project of their own (services/scratch.py).
+    # Exactly one row has it; it isn't in ProjectCreate/ProjectUpdate, so the API can't set it.
+    scratch: bool = False
     # The last task / doc number handed out in this project; numbers aren't reused.
     task_seq: int = 0
     doc_seq: int = 0
@@ -125,6 +128,7 @@ class ProjectUpdate(SQLModel):
 class ProjectRead(ProjectBase):
     id: int
     key: str
+    scratch: bool
     created_at: datetime
     updated_at: datetime
     open_tasks: int = 0
@@ -396,6 +400,17 @@ class AgentFollowUp(SQLModel):
     images: list[str] = []  # base64, as in AgentRunCreate
 
 
+class AgentMessageCreate(SQLModel):
+    """A message sent to a run while the agent is working."""
+
+    prompt: str
+    images: list[str] = []  # base64, as in AgentRunCreate
+
+
+class AgentMessageQueued(SQLModel):
+    message_id: str  # as in the run's "queued_message" and "user_message" events
+
+
 class PermissionModeUpdate(SQLModel):
     permission_mode: PermissionMode
 
@@ -429,6 +444,7 @@ class SessionAttention(SQLModel):
 class ApprovalDecision(SQLModel):
     allow: bool
     message: str = ""
+    answers: Optional[dict[str, str]] = None  # AskUserQuestion: question text -> the user's answer
 
 
 # --------------------------------------------------------------------------- source control
@@ -462,11 +478,14 @@ class UsageWindow(SQLModel):
 
 class ClaudeUsage(SQLModel):
     # signed_out: no Claude subscription sign-in found; expired: the sign-in needs renewing in Claude Code.
+    # Once there has been a good reading it's always returned as "ok"; a message then says why it isn't newer.
+    # The other statuses are only for when there's no reading at all.
     status: Literal["ok", "signed_out", "expired", "error"]
     message: Optional[str] = None
     plan: Optional[str] = None  # pro, max, team, ...
     windows: list[UsageWindow] = []
     fetched_at: Optional[datetime] = None
+    retry_at: Optional[datetime] = None  # after a failure: when Anthropic will be asked again
 
 
 # --------------------------------------------------------------------------- appearance

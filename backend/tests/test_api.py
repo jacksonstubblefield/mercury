@@ -46,6 +46,22 @@ def test_task_positions_and_update(client):
     assert {t["title"] for t in tasks} == {"one", "two"}
 
 
+def test_task_moved_to_another_column_goes_to_its_end(client):
+    p = _project(client)
+    url = f"/api/projects/{p['id']}/tasks"
+    first = client.post(url, json={"title": "first", "status": "review"}).json()
+    done = [client.post(url, json={"title": t, "status": "done"}).json() for t in ("a", "b")]
+
+    moved = client.patch(f"/api/tasks/{first['id']}", json={"status": "done"}).json()
+    assert moved["position"] > max(t["position"] for t in done)
+
+    # Saving without changing the column keeps the place; an explicit position wins.
+    same = client.patch(f"/api/tasks/{done[0]['id']}", json={"status": "done", "title": "A"}).json()
+    assert same["position"] == done[0]["position"]
+    placed = client.patch(f"/api/tasks/{done[0]['id']}", json={"status": "todo", "position": 0.5}).json()
+    assert placed["position"] == 0.5
+
+
 def test_docs(client):
     p = _project(client)
     d = client.post(f"/api/projects/{p['id']}/docs", json={"title": "Spec", "body": "# Hi"}).json()
@@ -105,7 +121,13 @@ def test_notes_table_is_migrated_to_docs(tmp_path, monkeypatch):
     con = sqlite3.connect(path)
     con.executescript(
         """
-        CREATE TABLE project (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL);
+        CREATE TABLE project (
+            id INTEGER PRIMARY KEY, name VARCHAR NOT NULL,
+            description VARCHAR NOT NULL DEFAULT '', repo_path VARCHAR, github_repo VARCHAR,
+            status VARCHAR(8) NOT NULL DEFAULT 'active', color VARCHAR NOT NULL DEFAULT '#7c8cff',
+            created_at DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00',
+            updated_at DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00'
+        );
         CREATE TABLE note (
             title VARCHAR NOT NULL, body VARCHAR NOT NULL, pinned BOOLEAN NOT NULL,
             id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES project (id) ON DELETE CASCADE,

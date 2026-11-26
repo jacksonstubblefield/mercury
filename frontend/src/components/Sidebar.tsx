@@ -25,10 +25,31 @@ interface Props {
 export function Sidebar({ projects, selectedId, onSelect, onNew, page, onOpenPage, sessions, onOpenSession }: Props) {
   const byId = new Map(projects.map((p) => [p.id, p]));
   const shown = sessions.filter((s) => byId.has(s.project_id));
+  // Scratch is pinned below the user's projects, just above the app pages, apart from their status groups.
+  const scratch = projects.find((p) => p.scratch);
+  const projectItem = (p: Project) => (
+    <div
+      key={p.id}
+      className={`project-item ${!page && p.id === selectedId ? "active" : ""}`}
+      onClick={() => onSelect(p.id)}
+      title={p.scratch ? "Sessions that don't belong to a project" : (p.repo_path ?? undefined)}
+    >
+      {p.scratch ? (
+        <svg className="nav-icon scratch-icon" style={{ color: p.color }} viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M10.8 2.4a1.6 1.6 0 0 1 2.3 2.3l-7.6 7.6-3 .7.7-3 7.6-7.6ZM9.5 3.8l2.3 2.3" />
+        </svg>
+      ) : (
+        <span className="dot" style={{ background: p.color }} />
+      )}
+      <span className="name">{p.name}</span>
+      {p.active_runs > 0 && <span className="badge live" title="Agents running">● {p.active_runs}</span>}
+      {p.open_tasks > 0 && <span className="badge" title="Open tasks">{p.open_tasks}</span>}
+    </div>
+  );
   return (
     <aside className="sidebar">
       <div className="brand">
-        <img className="brand-icon" src="/favicon-64.png" alt="" /> Mercury
+        <img className="brand-icon" src="/favicon-128.png" alt="" /> Mercury
       </div>
       {shown.length > 0 && (
         <div className="sidebar-sessions">
@@ -62,28 +83,17 @@ export function Sidebar({ projects, selectedId, onSelect, onNew, page, onOpenPag
       )}
       <div className="sidebar-section">
         {GROUPS.map(({ status, label }) => {
-          const group = projects.filter((p) => p.status === status);
+          const group = projects.filter((p) => !p.scratch && p.status === status);
           if (group.length === 0) return null;
           return (
             <div key={status}>
               <div className="sidebar-heading">{label}</div>
-              {group.map((p) => (
-                <div
-                  key={p.id}
-                  className={`project-item ${!page && p.id === selectedId ? "active" : ""}`}
-                  onClick={() => onSelect(p.id)}
-                  title={p.repo_path ?? undefined}
-                >
-                  <span className="dot" style={{ background: p.color }} />
-                  <span className="name">{p.name}</span>
-                  {p.active_runs > 0 && <span className="badge live" title="Agents running">● {p.active_runs}</span>}
-                  {p.open_tasks > 0 && <span className="badge" title="Open tasks">{p.open_tasks}</span>}
-                </div>
-              ))}
+              {group.map(projectItem)}
             </div>
           );
         })}
       </div>
+      {scratch && <div className="sidebar-scratch">{projectItem(scratch)}</div>}
       <nav className="sidebar-nav">
         <div className={`project-item ${page === "usage" ? "active" : ""}`} onClick={() => onOpenPage("usage")} title="Claude Code plan usage">
           <svg className="nav-icon" viewBox="0 0 16 16" aria-hidden="true">

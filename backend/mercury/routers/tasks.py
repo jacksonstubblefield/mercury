@@ -71,6 +71,9 @@ def update_task(task_id: int, body: TaskUpdate, session: SessionDep):
         kept = list(dict.fromkeys(body.images))
     removed = [n for n in current if n not in kept]
     added = _save_images(body.add_images, MAX_TASK_IMAGES - len(kept))
+    # A task moved to another column without saying where goes to the end of it.
+    if body.status is not None and body.status != task.status and "position" not in changes:
+        changes["position"] = next_position(session, task.project_id, body.status)
     task.sqlmodel_update(changes)
     task.images = kept + added  # a new list, so the JSON column is saved
     task.updated_at = utcnow()
