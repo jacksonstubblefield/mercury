@@ -21,7 +21,11 @@ A desktop app I use to keep track of my projects. Every project gets a board, do
 - **Scratch**: a catch-all project for sessions that don't belong anywhere.
 - Plus settings, themes, and a usage gauge so I know when I'm about to hit my limit.
 
-## Running it
+## Install
+
+Grab `Mercury-Setup-<version>.exe` from [Releases](https://github.com/jacksonstubblefield/mercury/releases) and run it. Windows only for now. Python and everything else come bundled; you just need git and a Claude Code login (or `ANTHROPIC_API_KEY`). It's not code-signed yet, so SmartScreen will complain: **More info → Run anyway**.
+
+## Running it from source
 
 You need Python 3.10+, Node 20+, git, and either a Claude Code login or `ANTHROPIC_API_KEY`. `gh` is optional (only the GitHub tab needs it).
 
@@ -30,7 +34,10 @@ npm run setup   # once
 npm run dev     # Vite + Electron, backend on :8765
 npm start       # built version
 npm test        # backend tests + typecheck
+npm run release # builds dist/Mercury-Setup-<version>.exe
 ```
+
+To ship a release, bump the version (`package.json`, `frontend/package.json`, `backend/pyproject.toml`, `backend/mercury/__init__.py`) and push a `v<version>` tag. CI builds the installer and drafts a GitHub release.
 
 Data lives in `~/.mercury`.
 
@@ -57,10 +64,9 @@ All optional.
 | `MERCURY_EMBEDDINGS` | `1` | `0` for keyword-only doc search |
 | `MERCURY_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Embedding model for doc search |
 | `MERCURY_EMBEDDING_THREADS` | `4` | CPU threads for embedding |
-| `MERCURY_PYTHON` | `backend/.venv` python | Python Electron uses for the backend |
+| `MERCURY_PYTHON` | `backend/.venv` (or bundled) python | Python Electron uses for the backend |
 | `MERCURY_ALLOWED_ORIGINS` | none | Extra allowed origins, comma-separated |
 
 ## Maybe someday
 
-- A real installer
 - Each agent run in its own git worktree so they don't step on each other

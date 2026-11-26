@@ -8,6 +8,7 @@ Mercury is a desktop project manager with Claude coding agents built in. It has 
 - `npm run dev`: Vite on :5173 plus Electron. Electron starts the backend on :8765, and Vite proxies `/api` to it.
 - `npm test`: backend pytest, then frontend `tsc --noEmit`. Run it before you finish.
 - `node scripts/test-backend.cjs -k <expr>`: a subset of backend tests.
+- `npm run release`: builds the Windows installer, `dist/Mercury-Setup-<version>.exe` (Electron + built UI + a standalone Python with the backend installed). Pushing a `v<version>` tag runs `.github/workflows/release.yml`, which builds it and drafts a GitHub release. The installed app reads `app.isPackaged` in `desktop/main.cjs` to use the bundled Python and UI, and logs the backend to `~/.mercury/backend.log`.
 
 ## Conventions
 

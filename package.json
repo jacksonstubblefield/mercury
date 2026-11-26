@@ -11,11 +11,48 @@
     "build": "npm --prefix frontend run build",
     "start": "npm run build && electron .",
     "test": "npm run test:backend && npm --prefix frontend run typecheck",
-    "test:backend": "node scripts/test-backend.cjs"
+    "test:backend": "node scripts/test-backend.cjs",
+    "release": "node scripts/release.cjs"
   },
   "devDependencies": {
     "concurrently": "^10.0.7",
     "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
     "wait-on": "^9.5.1"
+  },
+  "build": {
+    "appId": "com.jacksonstubblefield.mercury",
+    "productName": "Mercury",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets/icon"
+    },
+    "files": [
+      "desktop/**",
+      "assets/icon/**",
+      "package.json"
+    ],
+    "asar": false,
+    "extraResources": [
+      {
+        "from": "build/python",
+        "to": "python"
+      },
+      {
+        "from": "frontend/dist",
+        "to": "frontend"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "artifactName": "Mercury-Setup-${version}.${ext}",
+      "shortcutName": "Mercury",
+      "deleteAppDataOnUninstall": false
+    }
   }
 }
